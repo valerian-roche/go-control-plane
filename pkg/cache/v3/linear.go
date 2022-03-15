@@ -218,6 +218,33 @@ func (cache *LinearCache) DeleteResource(name string) error {
 	return nil
 }
 
+// UpdateResources updates a list of resources in the collection.
+// Resources provided with value == nil are considered as deleted.
+// Calling UpdateResources instead of iterating on UpdateResource and DeleteResource
+// is significantly more efficient when using delta-watches.
+func (cache *LinearCache) UpdateResources(toUpdate map[string]types.Resource, toDelete []string) error {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	cache.version++
+
+	modified := make(map[string]struct{}, len(toUpdate)+len(toDelete))
+	for name, resource := range toUpdate {
+		cache.versionVector[name] = cache.version
+		cache.resources[name] = resource
+		modified[name] = struct{}{}
+	}
+	for _, name := range toDelete {
+		delete(cache.versionVector, name)
+		delete(cache.resources, name)
+		modified[name] = struct{}{}
+	}
+
+	cache.notifyAll(modified)
+
+	return nil
+}
+
 // SetResources replaces current resources with a new set of resources.
 // This function is useful for wildcard xDS subscriptions.
 // This way watches that are subscribed to all resources are triggered only once regardless of how many resources are changed.
