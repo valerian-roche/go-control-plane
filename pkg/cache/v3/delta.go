@@ -31,12 +31,15 @@ type resourceContainer struct {
 func createDeltaResponse(ctx context.Context, req *DeltaRequest, state stream.StreamState, resources resourceContainer) *RawDeltaResponse {
 	// variables to build our response with
 	nextVersionMap := make(map[string]string)
-	filtered := make([]types.Resource, 0, len(resources.resourceMap))
-	toRemove := make([]string, 0)
+	var filtered []types.Resource
+	var toRemove []string
 
 	// If we are handling a wildcard request, we want to respond with all resources
 	switch {
 	case state.IsWildcard():
+		if len(state.GetResourceVersions()) == 0 {
+			filtered = make([]types.Resource, 0, len(resources.resourceMap))
+		}
 		for name, r := range resources.resourceMap {
 			// Since we've already precomputed the version hashes of the new snapshot,
 			// we can just set it here to be used for comparison later

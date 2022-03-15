@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -68,7 +69,14 @@ type resourceInfo struct {
 
 func verifyDeltaResponse(t *testing.T, ch <-chan DeltaResponse, resources []resourceInfo, deleted []string) {
 	t.Helper()
-	r := <-ch
+	var r DeltaResponse
+	select {
+	case r = <-ch:
+	case <-time.After(5 * time.Second):
+		t.Error("timeout waiting for delta response")
+		return
+	}
+
 	if r.GetDeltaRequest().TypeUrl != testType {
 		t.Errorf("unexpected empty request type URL: %q", r.GetDeltaRequest().TypeUrl)
 	}
@@ -155,6 +163,14 @@ func hashResource(t *testing.T, resource types.Resource) string {
 		t.Fatal(errors.New("failed to build resource version"))
 	}
 	return v
+}
+
+func createWildcardDeltaWatch(c *LinearCache, w chan DeltaResponse) {
+	state := stream.NewStreamState(true, nil)
+	c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, state, w)
+	resp := <-w
+	state.SetResourceVersions(resp.GetNextVersionMap())
+	c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, state, w) // Ensure the watch is set properly with cache values
 }
 
 func TestLinearInitialResources(t *testing.T) {
@@ -550,4 +566,69 @@ func TestLinearDeltaResourceDelete(t *testing.T) {
 	hashA = hashResource(t, a)
 	c.SetResources(map[string]types.Resource{"a": a})
 	verifyDeltaResponse(t, w, []resourceInfo{{"a", hashA}}, []string{"b"})
+}
+
+func TestLinearDeltaMultiResourceUpdates(t *testing.T) {
+	c := NewLinearCache(testType)
+	a := &endpoint.ClusterLoadAssignment{ClusterName: "a"}
+	hashA := hashResource(t, a)
+	b := &endpoint.ClusterLoadAssignment{ClusterName: "b"}
+	hashB := hashResource(t, b)
+	err := c.UpdateResources(map[string]types.Resource{"a": a, "b": b})
+	assert.NoError(t, err)
+
+	// Multiple updates
+	state := stream.NewStreamState(false, map[string]string{"a": hashA, "b": hashB})
+	w := make(chan DeltaResponse, 1)
+	c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, state, w)
+	mustBlockDelta(t, w)
+	checkDeltaWatchCount(t, c, 1)
+	a = &endpoint.ClusterLoadAssignment{ClusterName: "a", Endpoints: []*endpoint.LocalityLbEndpoints{ //resource update
+		{Priority: 10},
+	}}
+	b = &endpoint.ClusterLoadAssignment{ClusterName: "b", Endpoints: []*endpoint.LocalityLbEndpoints{ //resource update
+		{Priority: 15},
+	}}
+	hashA = hashResource(t, a)
+	hashB = hashResource(t, b)
+	c.UpdateResources(map[string]types.Resource{"a": a, "b": b})
+	verifyDeltaResponse(t, w, []resourceInfo{{"a", hashA}, {"b", hashB}}, nil)
+
+	// Update/add/delete
+	state = stream.NewStreamState(false, map[string]string{"a": hashA, "b": hashB})
+	c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, state, w)
+	mustBlockDelta(t, w)
+	checkDeltaWatchCount(t, c, 1)
+	a = &endpoint.ClusterLoadAssignment{ClusterName: "a", Endpoints: []*endpoint.LocalityLbEndpoints{ //resource update
+		{Priority: 15},
+	}}
+	d := &endpoint.ClusterLoadAssignment{ClusterName: "d", Endpoints: []*endpoint.LocalityLbEndpoints{}} // resource create
+	hashA = hashResource(t, a)
+	c.UpdateResources(map[string]types.Resource{"a": a, "d": d, "b": nil})
+	assert.Contains(t, c.resources, "d", "resource with name d not found in cache")
+	assert.NotContains(t, c.resources, "b", "resource with name b was found in cache")
+	verifyDeltaResponse(t, w, []resourceInfo{{"a", hashA}}, []string{"b"})
+
+	// Wildcard create/update
+	createWildcardDeltaWatch(c, w)
+	mustBlockDelta(t, w)
+	checkDeltaWatchCount(t, c, 1)
+	b = &endpoint.ClusterLoadAssignment{ClusterName: "b", Endpoints: []*endpoint.LocalityLbEndpoints{ //resource update
+		{Priority: 15},
+	}}
+	hashB = hashResource(t, b)
+	c.UpdateResources(map[string]types.Resource{"b": b})
+	verifyDeltaResponse(t, w, []resourceInfo{{"b", hashB}}, nil)
+
+	// Wildcard update/delete
+	createWildcardDeltaWatch(c, w)
+	mustBlockDelta(t, w)
+	checkDeltaWatchCount(t, c, 1)
+	a = &endpoint.ClusterLoadAssignment{ClusterName: "a", Endpoints: []*endpoint.LocalityLbEndpoints{ //resource update
+		{Priority: 25},
+	}}
+	hashA = hashResource(t, a)
+	c.UpdateResources(map[string]types.Resource{"a": a, "d": nil})
+	assert.NotContains(t, c.resources, "d", "resource with name d was found in cache")
+	verifyDeltaResponse(t, w, []resourceInfo{{"a", hashA}}, []string{"d"})
 }
