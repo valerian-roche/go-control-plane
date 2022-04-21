@@ -34,6 +34,10 @@ type Callbacks interface {
 	OnStreamDeltaResponse(int64, *discovery.DeltaDiscoveryRequest, *discovery.DeltaDiscoveryResponse)
 }
 
+type ExtendedCallbacks interface {
+	OnStreamDeltaResponseF(int64, *discovery.DeltaDiscoveryRequest, *discovery.DeltaDiscoveryResponse, func(typeURL string, resourceNames []string))
+}
+
 var deltaErrorResponse = &cache.RawDeltaResponse{}
 
 type server struct {
@@ -70,6 +74,20 @@ func (s *server) processDelta(str stream.DeltaStream, reqCh <-chan *discovery.De
 		}
 	}()
 
+	// Sets up a watch in the cache
+	processWatch := func(newWatch watch, watchTypeURL string) {
+		newWatch.responses = make(chan cache.DeltaResponse, 1)
+		newWatch.cancel = s.cache.CreateDeltaWatch(newWatch.req, newWatch.state, newWatch.responses)
+		watches.deltaWatches[watchTypeURL] = newWatch
+
+		go func() {
+			resp, more := <-newWatch.responses
+			if more {
+				watches.deltaMuxedResponses <- resp
+			}
+		}()
+	}
+
 	// Sends a response, returns the new stream nonce
 	send := func(resp cache.DeltaResponse) (string, error) {
 		if resp == nil {
@@ -85,6 +103,26 @@ func (s *server) processDelta(str stream.DeltaStream, reqCh <-chan *discovery.De
 		response.Nonce = strconv.FormatInt(streamNonce, 10)
 		if s.callbacks != nil {
 			s.callbacks.OnStreamDeltaResponse(streamID, resp.GetDeltaRequest(), response)
+
+			if extendedCallbacks, ok := s.callbacks.(ExtendedCallbacks); ok {
+				extendedCallbacks.OnStreamDeltaResponseF(streamID, resp.GetDeltaRequest(), response, func(typeURL string, resourceNames []string) {
+					// cancel existing watch to (re-)request a newer version
+					watch, ok := watches.deltaWatches[typeURL]
+					if !ok {
+						// There's no existing watch
+						return
+					} else {
+						watch.Cancel()
+					}
+					for _, resourceName := range resourceNames {
+						// This will force an update for those resources
+						// If not existing it will return them as removed
+						watch.state.GetResourceVersions()[resourceName] = ""
+					}
+
+					processWatch(watch, typeURL)
+				})
+			}
 		}
 
 		return response.Nonce, str.Send(response)
@@ -157,6 +195,7 @@ func (s *server) processDelta(str stream.DeltaStream, reqCh <-chan *discovery.De
 
 			// cancel existing watch to (re-)request a newer version
 			watch, ok := watches.deltaWatches[typeURL]
+			watch.req = req
 			if !ok {
 				// Initialize the state of the stream.
 				// Since there was no previous state, we know we're handling the first request of this type
@@ -169,16 +208,7 @@ func (s *server) processDelta(str stream.DeltaStream, reqCh <-chan *discovery.De
 			s.subscribe(req.GetResourceNamesSubscribe(), watch.state.GetResourceVersions())
 			s.unsubscribe(req.GetResourceNamesUnsubscribe(), watch.state.GetResourceVersions())
 
-			watch.responses = make(chan cache.DeltaResponse, 1)
-			watch.cancel = s.cache.CreateDeltaWatch(req, watch.state, watch.responses)
-			watches.deltaWatches[typeURL] = watch
-
-			go func() {
-				resp, more := <-watch.responses
-				if more {
-					watches.deltaMuxedResponses <- resp
-				}
-			}()
+			processWatch(watch, typeURL)
 		}
 	}
 }

@@ -17,48 +17,76 @@ import (
 	rsrc "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/stream/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/test/resource/v3"
 )
 
 func (config *mockConfigWatcher) CreateDeltaWatch(req *discovery.DeltaDiscoveryRequest, state stream.StreamState, out chan cache.DeltaResponse) func() {
 	config.deltaCounts[req.TypeUrl] = config.deltaCounts[req.TypeUrl] + 1
 
-	if len(config.deltaResponses[req.TypeUrl]) > 0 {
-		res := config.deltaResponses[req.TypeUrl][0]
-		// In subscribed, we only want to send back what's changed if we detect changes
-		var subscribed []types.Resource
-		r, _ := res.GetDeltaDiscoveryResponse()
+	resourceMap := config.deltaResources[req.TypeUrl]
+	versionMap := map[string]string{}
+	for name, resource := range resourceMap {
+		marshaledResource, _ := cache.MarshalResource(resource)
+		versionMap[name] = cache.HashResource(marshaledResource)
+	}
+	var nextVersionMap map[string]string
+	// In subscribed, we only want to send back what's changed if we detect changes
+	var filtered []types.Resource
+	var toRemove []string
 
-		switch {
-		case state.IsWildcard():
-			for _, resource := range r.Resources {
-				name := resource.GetName()
-				res, _ := cache.MarshalResource(resource)
-
-				nextVersion := cache.HashResource(res)
-				prevVersion, found := state.GetResourceVersions()[name]
-				if !found || (prevVersion != nextVersion) {
-					state.GetResourceVersions()[name] = nextVersion
-					subscribed = append(subscribed, resource)
-				}
-			}
-		default:
-			for _, resource := range r.Resources {
-				res, _ := cache.MarshalResource(resource)
-				nextVersion := cache.HashResource(res)
-				for _, prevVersion := range state.GetResourceVersions() {
-					if prevVersion != nextVersion {
-						subscribed = append(subscribed, resource)
-					}
-					state.GetResourceVersions()[resource.GetName()] = nextVersion
-				}
+	// If we are handling a wildcard request, we want to respond with all resources
+	switch {
+	case state.IsWildcard():
+		if len(state.GetResourceVersions()) == 0 {
+			filtered = make([]types.Resource, 0, len(resourceMap))
+		}
+		nextVersionMap = make(map[string]string, len(resourceMap))
+		for name, r := range resourceMap {
+			// Since we've already precomputed the version hashes of the new snapshot,
+			// we can just set it here to be used for comparison later
+			version := versionMap[name]
+			nextVersionMap[name] = version
+			prevVersion, found := state.GetResourceVersions()[name]
+			if !found || (prevVersion != version) {
+				filtered = append(filtered, r)
 			}
 		}
 
+		// Compute resources for removal
+		for name := range state.GetResourceVersions() {
+			if _, ok := resourceMap[name]; !ok {
+				toRemove = append(toRemove, name)
+			}
+		}
+	default:
+		// Reply only with the requested resources
+		nextVersionMap = make(map[string]string, len(state.GetResourceVersions()))
+		for name, prevVersion := range state.GetResourceVersions() {
+			if r, ok := resourceMap[name]; ok {
+				nextVersion := versionMap[name]
+				if prevVersion != nextVersion {
+					filtered = append(filtered, r)
+				}
+				nextVersionMap[name] = nextVersion
+			} else {
+				// We track non-existent resources for non-wildcard streams until the client explicitly unsubscribes from them.
+				nextVersionMap[name] = ""
+				// The version check is to make sure we are only sending an update once right after removal.
+				// If the client keeps the subscription, we skip the add for every subsequent response.
+				if prevVersion != "" {
+					toRemove = append(toRemove, name)
+				}
+			}
+		}
+	}
+
+	if len(filtered)+len(toRemove) > 0 {
 		out <- &cache.RawDeltaResponse{
 			DeltaRequest:      req,
-			Resources:         subscribed,
+			Resources:         filtered,
+			RemovedResources:  toRemove,
 			SystemVersionInfo: "",
-			NextVersionMap:    state.GetResourceVersions(),
+			NextVersionMap:    nextVersionMap,
 		}
 	} else {
 		config.deltaWatches++
@@ -129,78 +157,39 @@ func makeMockDeltaStream(t *testing.T) *mockDeltaStream {
 	}
 }
 
-func makeDeltaResponses() map[string][]cache.DeltaResponse {
-	return map[string][]cache.DeltaResponse{
-		rsrc.EndpointType: {
-			&cache.RawDeltaResponse{
-				Resources:         []types.Resource{endpoint},
-				DeltaRequest:      &discovery.DeltaDiscoveryRequest{TypeUrl: rsrc.EndpointType},
-				SystemVersionInfo: "1",
-			},
+func makeDeltaResources() map[string]map[string]types.Resource {
+	return map[string]map[string]types.Resource{
+		rsrc.EndpointType: map[string]types.Resource{
+			endpoint.GetClusterName(): endpoint,
 		},
-		rsrc.ClusterType: {
-			&cache.RawDeltaResponse{
-				Resources:         []types.Resource{cluster},
-				DeltaRequest:      &discovery.DeltaDiscoveryRequest{TypeUrl: rsrc.ClusterType},
-				SystemVersionInfo: "2",
-			},
+		rsrc.ClusterType: map[string]types.Resource{
+			cluster.Name: cluster,
 		},
-		rsrc.RouteType: {
-			&cache.RawDeltaResponse{
-				Resources:         []types.Resource{route},
-				DeltaRequest:      &discovery.DeltaDiscoveryRequest{TypeUrl: rsrc.RouteType},
-				SystemVersionInfo: "3",
-			},
+		rsrc.RouteType: map[string]types.Resource{
+			route.Name: route,
 		},
-		rsrc.ScopedRouteType: {
-			&cache.RawDeltaResponse{
-				Resources:         []types.Resource{scopedRoute},
-				DeltaRequest:      &discovery.DeltaDiscoveryRequest{TypeUrl: rsrc.ScopedRouteType},
-				SystemVersionInfo: "4",
-			},
+		rsrc.ScopedRouteType: map[string]types.Resource{
+			scopedRoute.Name: scopedRoute,
 		},
-		rsrc.VirtualHostType: {
-			&cache.RawDeltaResponse{
-				Resources:         []types.Resource{virtualHost},
-				DeltaRequest:      &discovery.DeltaDiscoveryRequest{TypeUrl: rsrc.VirtualHostType},
-				SystemVersionInfo: "5",
-			},
+		rsrc.VirtualHostType: map[string]types.Resource{
+			virtualHost.Name: virtualHost,
 		},
-		rsrc.ListenerType: {
-			&cache.RawDeltaResponse{
-				Resources:         []types.Resource{httpListener, httpScopedListener},
-				DeltaRequest:      &discovery.DeltaDiscoveryRequest{TypeUrl: rsrc.ListenerType},
-				SystemVersionInfo: "6",
-			},
+		rsrc.ListenerType: map[string]types.Resource{
+			httpListener.Name:       httpListener,
+			httpScopedListener.Name: httpScopedListener,
 		},
-		rsrc.SecretType: {
-			&cache.RawDeltaResponse{
-				SystemVersionInfo: "7",
-				Resources:         []types.Resource{secret},
-				DeltaRequest:      &discovery.DeltaDiscoveryRequest{TypeUrl: rsrc.SecretType},
-			},
+		rsrc.SecretType: map[string]types.Resource{
+			secret.Name: secret,
 		},
-		rsrc.RuntimeType: {
-			&cache.RawDeltaResponse{
-				SystemVersionInfo: "8",
-				Resources:         []types.Resource{runtime},
-				DeltaRequest:      &discovery.DeltaDiscoveryRequest{TypeUrl: rsrc.RuntimeType},
-			},
+		rsrc.RuntimeType: map[string]types.Resource{
+			runtime.Name: runtime,
 		},
-		rsrc.ExtensionConfigType: {
-			&cache.RawDeltaResponse{
-				SystemVersionInfo: "9",
-				Resources:         []types.Resource{extensionConfig},
-				DeltaRequest:      &discovery.DeltaDiscoveryRequest{TypeUrl: rsrc.ExtensionConfigType},
-			},
+		rsrc.ExtensionConfigType: map[string]types.Resource{
+			extensionConfig.Name: extensionConfig,
 		},
 		// Pass-through type (types without explicit handling)
-		opaqueType: {
-			&cache.RawDeltaResponse{
-				SystemVersionInfo: "10",
-				Resources:         []types.Resource{opaque},
-				DeltaRequest:      &discovery.DeltaDiscoveryRequest{TypeUrl: opaqueType},
-			},
+		opaqueType: map[string]types.Resource{
+			"opaque": opaque,
 		},
 	}
 }
@@ -237,7 +226,7 @@ func TestDeltaResponseHandlersWildcard(t *testing.T) {
 	for _, typ := range testTypes {
 		t.Run(typ, func(t *testing.T) {
 			config := makeMockConfigWatcher()
-			config.deltaResponses = makeDeltaResponses()
+			config.deltaResources = makeDeltaResources()
 			s := server.NewServer(context.Background(), config, server.CallbackFuncs{})
 
 			resp := makeMockDeltaStream(t)
@@ -266,17 +255,17 @@ func TestDeltaResponseHandlers(t *testing.T) {
 	for _, typ := range testTypes {
 		t.Run(typ, func(t *testing.T) {
 			config := makeMockConfigWatcher()
-			config.deltaResponses = makeDeltaResponses()
+			config.deltaResources = makeDeltaResources()
 			s := server.NewServer(context.Background(), config, server.CallbackFuncs{})
 
 			resp := makeMockDeltaStream(t)
 			// This is a wildcard request since we don't specify a list of resource subscriptions
-			res, err := config.deltaResponses[typ][0].GetDeltaDiscoveryResponse()
-			if err != nil {
-				t.Error(err)
+			resourceNames := []string{}
+			for resourceName := range config.deltaResources[typ] {
+				resourceNames = append(resourceNames, resourceName)
 			}
 			// We only subscribe to one resource to see if we get the appropriate number of resources back
-			resp.recv <- &discovery.DeltaDiscoveryRequest{Node: node, TypeUrl: typ, ResourceNamesSubscribe: []string{res.Resources[0].Name}}
+			resp.recv <- &discovery.DeltaDiscoveryRequest{Node: node, TypeUrl: typ, ResourceNamesSubscribe: resourceNames}
 
 			go func() {
 				err := process(typ, resp, s)
@@ -300,7 +289,7 @@ func TestSendDeltaError(t *testing.T) {
 	for _, typ := range testTypes {
 		t.Run(typ, func(t *testing.T) {
 			config := makeMockConfigWatcher()
-			config.deltaResponses = makeDeltaResponses()
+			config.deltaResources = makeDeltaResources()
 			s := server.NewServer(context.Background(), config, server.CallbackFuncs{})
 
 			// make a request with an error
@@ -322,7 +311,7 @@ func TestSendDeltaError(t *testing.T) {
 
 func TestDeltaAggregatedHandlers(t *testing.T) {
 	config := makeMockConfigWatcher()
-	config.deltaResponses = makeDeltaResponses()
+	config.deltaResources = makeDeltaResources()
 	resp := makeMockDeltaStream(t)
 
 	reqs := []*discovery.DeltaDiscoveryRequest{
@@ -447,7 +436,7 @@ func TestDeltaCallbackError(t *testing.T) {
 	for _, typ := range testTypes {
 		t.Run(typ, func(t *testing.T) {
 			config := makeMockConfigWatcher()
-			config.deltaResponses = makeDeltaResponses()
+			config.deltaResources = makeDeltaResources()
 
 			s := server.NewServer(context.Background(), config, server.CallbackFuncs{
 				DeltaStreamOpenFunc: func(ctx context.Context, i int64, s string) error {
@@ -470,4 +459,102 @@ func TestDeltaCallbackError(t *testing.T) {
 			close(resp.recv)
 		})
 	}
+}
+
+type testExtendedCallbacks struct {
+	server.CallbackFuncs
+	triggerType  string
+	triggerNonce string
+}
+
+func (c testExtendedCallbacks) OnStreamDeltaResponseF(streamId int64, req *discovery.DeltaDiscoveryRequest, resp *discovery.DeltaDiscoveryResponse, updateTrigger func(typeURL string, resourceNames []string)) {
+	if req.TypeUrl == rsrc.ClusterType && resp.Nonce == c.triggerNonce {
+		updateTrigger(c.triggerType, []string{"otherCluster"})
+	}
+}
+
+func TestDeltaCallbackTrigger(t *testing.T) {
+	config := makeMockConfigWatcher()
+	resp := makeMockDeltaStream(t)
+
+	callback := testExtendedCallbacks{
+		triggerType:  rsrc.ClusterType,
+		triggerNonce: "1",
+	}
+	s := server.NewServer(context.Background(), config, &callback)
+	go func() {
+		err := s.DeltaAggregatedResources(resp)
+		assert.NoError(t, err)
+	}()
+
+	validateResponse := func(t *testing.T, expectedType string, expectedResources []string) {
+		t.Helper()
+		response := <-resp.sent
+		assert.Equal(t, expectedType, response.TypeUrl)
+		if assert.Equal(t, len(expectedResources), len(response.Resources)) {
+			var names []string
+			for _, resource := range response.Resources {
+				names = append(names, resource.Name)
+			}
+			assert.ElementsMatch(t, names, expectedResources)
+		}
+	}
+
+	t.Run("Same url type", func(t *testing.T) {
+		config.deltaResources = map[string]map[string]types.Resource{
+			rsrc.ClusterType: map[string]types.Resource{
+				cluster.Name:   cluster,
+				"otherCluster": resource.MakeCluster(resource.Ads, "otherCluster"),
+			},
+		}
+		resp.recv <- &discovery.DeltaDiscoveryRequest{
+			Node:                   node,
+			TypeUrl:                rsrc.ClusterType,
+			ResourceNamesSubscribe: []string{clusterName},
+		}
+
+		// The first response only includes the requested cluster
+		validateResponse(t, rsrc.ClusterType, []string{clusterName})
+
+		// The second response also includes the triggered update
+		// It should ideally not return the initial resource, but sadly this doesn't properly work when using the same type
+		validateResponse(t, rsrc.ClusterType, []string{clusterName, "otherCluster"})
+
+		assert.Equal(t, 0, config.deltaWatches)
+	})
+
+	t.Run("Different url type, no existing watch", func(t *testing.T) {
+		callback.triggerType = rsrc.EndpointType
+		callback.triggerNonce = "3"
+		resp.recv <- &discovery.DeltaDiscoveryRequest{
+			Node:                   node,
+			TypeUrl:                rsrc.ClusterType,
+			ResourceNamesSubscribe: []string{clusterName},
+		}
+		validateResponse(t, rsrc.ClusterType, []string{clusterName})
+		assert.Equal(t, 0, config.deltaWatches)
+	})
+
+	t.Run("Different url type, existing watch", func(t *testing.T) {
+		config.deltaResources[rsrc.EndpointType] = map[string]types.Resource{
+			"otherCluster": resource.MakeEndpoint("otherCluster", 1234),
+		}
+		callback.triggerType = rsrc.EndpointType
+		callback.triggerNonce = "4"
+		resp.recv <- &discovery.DeltaDiscoveryRequest{
+			Node:                   node,
+			TypeUrl:                rsrc.EndpointType,
+			ResourceNamesSubscribe: []string{endpoint.ClusterName},
+		}
+
+		resp.recv <- &discovery.DeltaDiscoveryRequest{
+			Node:                   node,
+			TypeUrl:                rsrc.ClusterType,
+			ResourceNamesSubscribe: []string{clusterName},
+		}
+		validateResponse(t, rsrc.ClusterType, []string{clusterName})
+		validateResponse(t, rsrc.EndpointType, []string{"otherCluster"})
+		assert.Equal(t, 0, config.deltaWatches)
+	})
+	close(resp.recv)
 }

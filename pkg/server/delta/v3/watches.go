@@ -37,6 +37,7 @@ type watch struct {
 	responses chan cache.DeltaResponse
 	cancel    func()
 	nonce     string
+	req       *cache.DeltaRequest
 
 	state stream.StreamState
 }
