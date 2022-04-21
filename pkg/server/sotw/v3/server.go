@@ -49,6 +49,10 @@ type Callbacks interface {
 	OnStreamResponse(context.Context, int64, *discovery.DiscoveryRequest, *discovery.DiscoveryResponse)
 }
 
+type ExtendedCallbacks interface {
+	OnStreamResponseF(context.Context, int64, *discovery.DiscoveryRequest, *discovery.DiscoveryResponse, func(typeURL string, resourceNames []string))
+}
+
 // NewServer creates handlers from a config watcher and callbacks.
 func NewServer(ctx context.Context, config cache.ConfigWatcher, callbacks Callbacks) Server {
 	return &server{cache: config, callbacks: callbacks, ctx: ctx}
@@ -123,6 +127,26 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 
 		if s.callbacks != nil {
 			s.callbacks.OnStreamResponse(resp.GetContext(), streamID, resp.GetRequest(), out)
+			if extendedCallbacks, ok := s.callbacks.(ExtendedCallbacks); ok {
+				extendedCallbacks.OnStreamResponseF(resp.GetContext(), streamID, resp.GetRequest(), out, func(typeURL string, resourceNames []string) {
+					if w, ok := watches.responders[typeURL]; !ok {
+						return
+					} else {
+						w.close()
+
+						// This will resend all values, as we don't have a way to provide known versions currently
+						// This should be fixed for cases when partial response can be returned (e.g. EDS)
+						// Currently both simple and linear caches have very different behaviors related to streamState
+						w.req.VersionInfo = ""
+						responder := make(chan cache.Response, 1)
+						w.cancel = s.cache.CreateWatch(w.req, w.state, responder)
+						w.response = responder
+
+						watches.addWatch(typeURL, w)
+						watches.recompute(s.ctx, reqCh)
+					}
+				})
+			}
 		}
 		return out.Nonce, str.Send(out)
 	}
@@ -201,6 +225,8 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 					watches.addWatch(typeURL, &watch{
 						cancel:   s.cache.CreateWatch(req, streamState, responder),
 						response: responder,
+						req:      req,
+						state:    streamState,
 					})
 				}
 			} else {
@@ -209,6 +235,8 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 				watches.addWatch(typeURL, &watch{
 					cancel:   s.cache.CreateWatch(req, streamState, responder),
 					response: responder,
+					req:      req,
+					state:    streamState,
 				})
 			}
 
