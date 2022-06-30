@@ -26,9 +26,7 @@ func newWatches() watches {
 // Cancel all watches
 func (w *watches) Cancel() {
 	for _, watch := range w.deltaWatches {
-		if watch.cancel != nil {
-			watch.cancel()
-		}
+		watch.Cancel()
 	}
 }
 
