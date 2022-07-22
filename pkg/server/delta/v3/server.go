@@ -78,6 +78,12 @@ func (s *server) processDelta(str stream.DeltaStream, reqCh <-chan *discovery.De
 
 	// Sets up a watch in the cache
 	processWatch := func(newWatch watch, watchTypeURL string) {
+		if newWatch.req == nil {
+			// This watch does not include an actual client watch
+			// Only store the state
+			watches.deltaWatches[watchTypeURL] = newWatch
+			return
+		}
 		newWatch.responses = make(chan cache.DeltaResponse, 1)
 		newWatch.cancel = s.cache.CreateDeltaWatch(newWatch.req, newWatch.state, newWatch.responses)
 		watches.deltaWatches[watchTypeURL] = newWatch
@@ -108,17 +114,28 @@ func (s *server) processDelta(str stream.DeltaStream, reqCh <-chan *discovery.De
 
 			if extendedCallbacks, ok := s.callbacks.(ExtendedCallbacks); ok {
 				extendedCallbacks.OnStreamDeltaResponseF(streamID, resp.GetDeltaRequest(), response, func(typeURL string, resourceNames []string) {
-					// cancel existing watch to (re-)request a newer version
+					// Check if there is an existing state for this URL type
+					// If yes and there is a watch on it (i.e. req is set),
+					//   - cancel the watch (as state is immutable while a watch is running)
+					//   - reset the version for the resources we want to trigger
+					//   - restart a watch
+					// If there is a state with no watch
+					//   - simply update the version for mentioned resources to be tracked
+					// If there is no watch
+					//   - create an empty one with the versions we want
 					watch, ok := watches.deltaWatches[typeURL]
 					if !ok {
 						// There's no existing watch
-						return
+						// Create a state to track resources we want to invalidate
+						// This watch will not have a request and won't be cancelled/watched until a proper request is received
+						watch.state = stream.NewStreamState(false, nil)
 					} else {
 						watch.Cancel()
 					}
 					for _, resourceName := range resourceNames {
 						// This will force an update for those resources
 						// If not existing it will return them as removed
+						// /!\ If not using wildcard, only watched resources will be returned (set or removed)
 						watch.state.GetResourceVersions()[resourceName] = ""
 					}
 
@@ -194,9 +211,18 @@ func (s *server) processDelta(str stream.DeltaStream, reqCh <-chan *discovery.De
 
 			typeURL := req.GetTypeUrl()
 
-			// cancel existing watch to (re-)request a newer version
+			// Create a watch for this request
+			// Three possible states here:
+			//  - there is no state for this type
+			//     -> Create a new state, attach the request and start the watch
+			//  - there is an existing state without a watch (i.e. no request attached)
+			//     -> Update the state with initial resources provided (as well as setting legacy wildcard status)
+			//        Consider versions defined on the state as taking precedence over the ones set by envoy
+			//     This behavior is used to allow force-pushing resources to envoy.
+			//     This is itself used to workaround envoy bugs in its delta state-machine.
+			//  - there is an existing state with a watch
+			//     -> cancel the watch (a state with an active watch is immutable), then update the state with the new request parameters
 			watch, ok := watches.deltaWatches[typeURL]
-			watch.req = req
 			if !ok {
 				// Initialize the state of the stream.
 				// Since there was no previous state, we know we're handling the first request of this type
@@ -205,13 +231,29 @@ func (s *server) processDelta(str stream.DeltaStream, reqCh <-chan *discovery.De
 				// If the state starts with this legacy mode, adding new resources will not unsubscribe from wildcard.
 				// It can still be done by explicitly unsubscribing from "*"
 				watch.state = stream.NewStreamState(len(req.GetResourceNamesSubscribe()) == 0, req.GetInitialResourceVersions())
+			} else if watch.req == nil {
+				// There is a state but no active watch
+				// Update the state with the request information in the same way as above
+				watch.state.SetWildcard(len(req.GetResourceNamesSubscribe()) == 0)
+				versions := make(map[string]string, len(req.GetInitialResourceVersions()))
+				for resource, version := range req.GetInitialResourceVersions() {
+					// Versions defined on the state take precedence to versions provided by envoy
+					// This allows force-pushing resources to envoy even if the versions have not changed
+					if stateVersion, ok := watch.state.GetResourceVersions()[resource]; ok {
+						version = stateVersion
+					}
+					versions[resource] = version
+				}
+				watch.state.SetResourceVersions(versions)
 			} else {
+				// There is an active watch, cancel it before altering anything
 				watch.Cancel()
 			}
 
 			s.subscribe(req.GetResourceNamesSubscribe(), &watch.state)
 			s.unsubscribe(req.GetResourceNamesUnsubscribe(), &watch.state)
 
+			watch.req = req
 			processWatch(watch, typeURL)
 		}
 	}
