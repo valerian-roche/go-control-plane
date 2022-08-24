@@ -63,15 +63,6 @@ type server struct {
 	streamCount int64
 }
 
-// Discovery response that is sent over GRPC stream
-// We need to record what resource names are already sent to a client
-// So if the client requests a new name we can respond back
-// regardless current snapshot version (even if it is not changed yet)
-type lastDiscoveryResponse struct {
-	nonce     string
-	resources map[string]struct{}
-}
-
 // process handles a bi-di stream request
 func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryRequest, defaultTypeURL string) error {
 	// increment stream count
@@ -81,8 +72,7 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 	// ignores stale nonces. nonce is only modified within send() function.
 	var streamNonce int64
 
-	streamState := stream.NewStreamState(false, map[string]string{})
-	lastDiscoveryResponses := map[string]lastDiscoveryResponse{}
+	streamStates := map[string]stream.StreamState{}
 
 	// a collection of stack allocated watches per request type
 	watches := newWatches()
@@ -111,16 +101,6 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 		// increment nonce
 		streamNonce = streamNonce + 1
 		out.Nonce = strconv.FormatInt(streamNonce, 10)
-
-		lastResponse := lastDiscoveryResponse{
-			nonce:     out.Nonce,
-			resources: make(map[string]struct{}),
-		}
-		for _, r := range resp.GetRequest().ResourceNames {
-			lastResponse.resources[r] = struct{}{}
-		}
-		lastDiscoveryResponses[resp.GetRequest().TypeUrl] = lastResponse
-
 		if s.callbacks != nil {
 			s.callbacks.OnStreamResponse(resp.GetContext(), streamID, resp.GetRequest(), out)
 		}
@@ -183,14 +163,25 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 				}
 			}
 
-			if lastResponse, ok := lastDiscoveryResponses[req.TypeUrl]; ok {
-				if lastResponse.nonce == "" || lastResponse.nonce == nonce {
-					// Let's record Resource names that a client has received.
-					streamState.SetKnownResourceNames(req.TypeUrl, lastResponse.resources)
+			typeURL := req.GetTypeUrl()
+			state := streamStates[typeURL]
+			if responder, ok := watches.responders[typeURL]; ok {
+				if responder.nonce != "" && responder.nonce == nonce {
+					// The nonce is matching, this is an ACK from the client
+					state.CommitPendingResources()
 				}
 			}
 
-			typeURL := req.GetTypeUrl()
+			// Remove resources no longer subscribed from the stream state
+			// This ensures we will send a resource if it is unsubscribed then subscribed again
+			// without a cache version change
+			unsubscribedResources := getUnsubscribedResources(req.ResourceNames, state.GetResourceVersions())
+			for _, resourceName := range unsubscribedResources {
+				delete(state.GetResourceVersions(), resourceName)
+			}
+			// Remove from pending resources to ensure we won't lose this state when commiting
+			state.RemovePendingResources(unsubscribedResources)
+
 			responder := make(chan cache.Response, 1)
 			if w, ok := watches.responders[typeURL]; ok {
 				// We've found a pre-existing watch, lets check and update if needed.
@@ -199,7 +190,7 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 					w.close()
 
 					watches.addWatch(typeURL, &watch{
-						cancel:   s.cache.CreateWatch(req, streamState, responder),
+						cancel:   s.cache.CreateWatch(req, state, responder),
 						response: responder,
 					})
 				}
@@ -207,10 +198,12 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 				// No pre-existing watch exists, let's create one.
 				// We need to precompute the watches first then open a watch in the cache.
 				watches.addWatch(typeURL, &watch{
-					cancel:   s.cache.CreateWatch(req, streamState, responder),
+					cancel:   s.cache.CreateWatch(req, state, responder),
 					response: responder,
 				})
 			}
+
+			streamStates[typeURL] = state
 
 			// Recompute the dynamic select cases for this stream.
 			watches.recompute(s.ctx, reqCh)
@@ -226,6 +219,19 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 			if err != nil {
 				return err
 			}
+
+			version, err := res.GetVersion()
+			if err != nil {
+				return err
+			}
+
+			state := streamStates[res.GetRequest().TypeUrl]
+			resources := make(map[string]string, len(res.GetResourceNames()))
+			for _, name := range res.GetResourceNames() {
+				resources[name] = version
+			}
+			state.SetPendingResources(resources)
+			streamStates[res.GetRequest().TypeUrl] = state
 
 			watches.responders[res.GetRequest().TypeUrl].nonce = nonce
 		}
@@ -254,4 +260,17 @@ func (s *server) StreamHandler(stream stream.Stream, typeURL string) error {
 	}()
 
 	return s.process(stream, reqCh, typeURL)
+}
+
+func getUnsubscribedResources(newResources []string, knownResources map[string]string) (removedResources []string) {
+	newResourcesMap := make(map[string]struct{}, len(newResources))
+	for _, resourceName := range newResources {
+		newResourcesMap[resourceName] = struct{}{}
+	}
+	for resourceName := range knownResources {
+		if _, ok := newResourcesMap[resourceName]; !ok {
+			removedResources = append(removedResources, resourceName)
+		}
+	}
+	return
 }

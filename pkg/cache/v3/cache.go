@@ -85,6 +85,8 @@ type Response interface {
 	// Get the version in the Response.
 	GetVersion() (string, error)
 
+	GetResourceNames() []string
+
 	// Get the context provided during response creation.
 	GetContext() context.Context
 }
@@ -121,6 +123,9 @@ type RawResponse struct {
 
 	// Resources to be included in the response.
 	Resources []types.ResourceWithTTL
+
+	// Names of the resources included in the response
+	ResourceNames []string
 
 	// Whether this is a heartbeat response. For xDS versions that support TTL, this
 	// will be converted into a response that doesn't contain the actual resource protobuf.
@@ -170,6 +175,8 @@ type PassthroughResponse struct {
 
 	// The discovery response that needs to be sent as is, without any marshaling transformations.
 	DiscoveryResponse *discovery.DiscoveryResponse
+
+	ResourceNames []string
 
 	ctx context.Context
 }
@@ -225,6 +232,10 @@ func (r *RawResponse) GetDiscoveryResponse() (*discovery.DiscoveryResponse, erro
 	}
 
 	return marshaledResponse.(*discovery.DiscoveryResponse), nil
+}
+
+func (r *RawResponse) GetResourceNames() []string {
+	return r.ResourceNames
 }
 
 // GetDeltaDiscoveryResponse performs the marshaling the first time its called and uses the cached response subsequently.
@@ -328,6 +339,11 @@ func (r *RawResponse) maybeCreateTTLResource(resource types.ResourceWithTTL) (ty
 // GetDiscoveryResponse returns the final passthrough Discovery Response.
 func (r *PassthroughResponse) GetDiscoveryResponse() (*discovery.DiscoveryResponse, error) {
 	return r.DiscoveryResponse, nil
+}
+
+// GetResourceNames returns the list of resources included within the response
+func (r *PassthroughResponse) GetResourceNames() []string {
+	return r.ResourceNames
 }
 
 // GetDeltaDiscoveryResponse returns the final passthrough Delta Discovery Response.

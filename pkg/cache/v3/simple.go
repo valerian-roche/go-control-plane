@@ -347,7 +347,7 @@ func (cache *snapshotCache) CreateWatch(request *Request, streamState stream.Str
 	}
 
 	if exists {
-		knownResourceNames := streamState.GetKnownResourceNames(request.TypeUrl)
+		knownResourceNames := streamState.GetResourceVersions()
 		diff := []string{}
 		for _, r := range request.ResourceNames {
 			if _, ok := knownResourceNames[r]; !ok {
@@ -434,6 +434,7 @@ func (cache *snapshotCache) respond(ctx context.Context, request *Request, value
 
 func createResponse(ctx context.Context, request *Request, resources map[string]types.ResourceWithTTL, version string, heartbeat bool) Response {
 	filtered := make([]types.ResourceWithTTL, 0, len(resources))
+	var resourceNames []string
 
 	// Reply only with the requested resources. Envoy may ask each resource
 	// individually in a separate stream. It is ok to reply with the same version
@@ -443,20 +444,23 @@ func createResponse(ctx context.Context, request *Request, resources map[string]
 		for name, resource := range resources {
 			if set[name] {
 				filtered = append(filtered, resource)
+				resourceNames = append(resourceNames, name)
 			}
 		}
 	} else {
-		for _, resource := range resources {
+		for name, resource := range resources {
 			filtered = append(filtered, resource)
+			resourceNames = append(resourceNames, name)
 		}
 	}
 
 	return &RawResponse{
-		Request:   request,
-		Version:   version,
-		Resources: filtered,
-		Heartbeat: heartbeat,
-		Ctx:       ctx,
+		Request:       request,
+		Version:       version,
+		Resources:     filtered,
+		ResourceNames: resourceNames,
+		Heartbeat:     heartbeat,
+		Ctx:           ctx,
 	}
 }
 

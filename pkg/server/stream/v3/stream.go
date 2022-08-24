@@ -34,8 +34,9 @@ type StreamState struct { // nolint:golint,revive
 	// This field stores the last state sent to the client.
 	resourceVersions map[string]string
 
-	// knownResourceNames contains resource names that a client has received previously
-	knownResourceNames map[string]map[string]struct{}
+	// Provides the list of resources (and their version) that have been sent to the client
+	// but not ACKed yet
+	pendingResources map[string]string
 
 	// indicates whether the object has been modified since its creation
 	first bool
@@ -55,6 +56,24 @@ func (s *StreamState) SetSubscribedResourceNames(subscribedResourceNames map[str
 	s.subscribedResourceNames = subscribedResourceNames
 }
 
+func (s *StreamState) SetPendingResources(resources map[string]string) {
+	s.pendingResources = resources
+}
+
+func (s *StreamState) RemovePendingResources(resources []string) {
+	for _, resource := range resources {
+		delete(s.pendingResources, resource)
+	}
+}
+
+func (s *StreamState) CommitPendingResources() {
+	clientVersions := s.GetResourceVersions()
+	for name, version := range s.pendingResources {
+		clientVersions[name] = version
+		delete(s.pendingResources, name)
+	}
+}
+
 // WatchesResources returns whether at least one of the resource provided is currently watch by the stream
 // It is currently only applicable to delta-xds
 // If the request is wildcard, it will always return true
@@ -72,6 +91,9 @@ func (s *StreamState) WatchesResources(resourceNames map[string]struct{}) bool {
 }
 
 func (s *StreamState) GetResourceVersions() map[string]string {
+	if s.resourceVersions == nil {
+		s.resourceVersions = make(map[string]string)
+	}
 	return s.resourceVersions
 }
 
@@ -92,22 +114,6 @@ func (s *StreamState) IsWildcard() bool {
 	return s.wildcard
 }
 
-func (s *StreamState) SetKnownResourceNames(url string, names map[string]struct{}) {
-	s.knownResourceNames[url] = names
-}
-
-func (s *StreamState) SetKnownResourceNamesAsList(url string, names []string) {
-	m := map[string]struct{}{}
-	for _, name := range names {
-		m[name] = struct{}{}
-	}
-	s.knownResourceNames[url] = m
-}
-
-func (s *StreamState) GetKnownResourceNames(url string) map[string]struct{} {
-	return s.knownResourceNames[url]
-}
-
 // NewStreamState initializes a stream state.
 func NewStreamState(wildcard bool, initialResourceVersions map[string]string) StreamState {
 	state := StreamState{
@@ -115,11 +121,6 @@ func NewStreamState(wildcard bool, initialResourceVersions map[string]string) St
 		subscribedResourceNames: map[string]struct{}{},
 		resourceVersions:        initialResourceVersions,
 		first:                   true,
-		knownResourceNames:      map[string]map[string]struct{}{},
-	}
-
-	if initialResourceVersions == nil {
-		state.resourceVersions = make(map[string]string)
 	}
 
 	return state
