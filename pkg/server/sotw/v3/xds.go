@@ -121,7 +121,7 @@ func (s *server) process(str stream.Stream, reqCh chan *discovery.DiscoveryReque
 			if lastResponse, ok := sw.lastDiscoveryResponses[req.GetTypeUrl()]; ok {
 				if lastResponse.nonce == "" || lastResponse.nonce == nonce {
 					// Let's record Resource names that a client has received.
-					streamState.SetACKedResources(lastResponse.resources)
+					streamState.SetKnownResources(lastResponse.resources)
 				}
 			}
 

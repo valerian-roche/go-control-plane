@@ -41,11 +41,11 @@ type DeltaRequest = discovery.DeltaDiscoveryRequest
 // Though the methods may return mutable parts of the state for performance reasons,
 // the cache is expected to consider this state as immutable and thread safe between a watch creation and its cancellation.
 type SubscriptionState interface {
-	// GetACKedResources returns a list of resources that the client has ACK'd and their associated version.
+	// GetKnownResources returns a list of resources that the client has been sent.
 	// The versions are:
 	//  - delta protocol: version of the specific resource set in the response
 	//  - sotw protocol: version of the global response when the resource was last ACKed
-	GetACKedResources() map[string]string
+	GetKnownResources() map[string]string
 
 	// GetSubscribedResources returns the list of resources currently subscribed to by the client for the type.
 	// For delta it keeps track of subscription updates across requests
@@ -119,6 +119,9 @@ type Response interface {
 	// Get the version in the Response.
 	GetVersion() (string, error)
 
+	// Get the list of resources part of the response without having to cast each resource.
+	GetResourceNames() []string
+
 	// Get the context provided during response creation.
 	GetContext() context.Context
 }
@@ -155,6 +158,9 @@ type RawResponse struct {
 
 	// Resources to be included in the response.
 	Resources []types.ResourceWithTTL
+
+	// Names of the resources set in the response.
+	ResourceNames []string
 
 	// Whether this is a heartbeat response. For xDS versions that support TTL, this
 	// will be converted into a response that doesn't contain the actual resource protobuf.
@@ -206,6 +212,9 @@ type PassthroughResponse struct {
 
 	// The discovery response that needs to be sent as is, without any marshaling transformations.
 	DiscoveryResponse *discovery.DiscoveryResponse
+
+	// Names of the resources set in the response.
+	ResourceNames []string
 
 	ctx context.Context
 }
@@ -306,6 +315,12 @@ func (r *RawDeltaResponse) GetDeltaDiscoveryResponse() (*discovery.DeltaDiscover
 	return marshaledResponse.(*discovery.DeltaDiscoveryResponse), nil
 }
 
+// GetResourceNames returns the list of resources returned within the response
+// without having to decode the resources
+func (r *RawResponse) GetResourceNames() []string {
+	return r.ResourceNames
+}
+
 // GetRequest returns the original Discovery Request.
 func (r *RawResponse) GetRequest() *discovery.DiscoveryRequest {
 	return r.Request
@@ -366,6 +381,12 @@ func (r *RawResponse) maybeCreateTTLResource(resource types.ResourceWithTTL) (ty
 // GetDiscoveryResponse returns the final passthrough Discovery Response.
 func (r *PassthroughResponse) GetDiscoveryResponse() (*discovery.DiscoveryResponse, error) {
 	return r.DiscoveryResponse, nil
+}
+
+// GetResourceNames returns the list of resources returned within the response
+// without having to decode the resources
+func (r *PassthroughResponse) GetResourceNames() []string {
+	return r.ResourceNames
 }
 
 // GetDeltaDiscoveryResponse returns the final passthrough Delta Discovery Response.

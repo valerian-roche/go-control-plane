@@ -114,7 +114,7 @@ func (s *server) processADS(sw *streamWrapper, reqCh chan *discovery.DiscoveryRe
 			if lastResponse, ok := sw.lastDiscoveryResponses[typeURL]; ok {
 				if lastResponse.nonce == "" || lastResponse.nonce == nonce {
 					// Let's record Resource names that a client has received.
-					streamState.SetACKedResources(lastResponse.resources)
+					streamState.SetKnownResources(lastResponse.resources)
 				}
 			}
 

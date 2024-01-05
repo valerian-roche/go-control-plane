@@ -9,8 +9,8 @@ type SubscriptionState struct {
 	// This list might be non-empty even when set as wildcard.
 	subscribedResourceNames map[string]struct{}
 
-	// ackedResources contains the resources acknowledged by the client and the acknowledged versions.
-	ackedResources map[string]string
+	// knownResources contains the resources sent to the client and their versions.
+	knownResources map[string]string
 }
 
 // NewSubscriptionState initializes a stream state.
@@ -18,11 +18,11 @@ func NewSubscriptionState(wildcard bool, initialResourceVersions map[string]stri
 	state := SubscriptionState{
 		wildcard:                wildcard,
 		subscribedResourceNames: map[string]struct{}{},
-		ackedResources:          initialResourceVersions,
+		knownResources:          initialResourceVersions,
 	}
 
 	if initialResourceVersions == nil {
-		state.ackedResources = make(map[string]string)
+		state.knownResources = make(map[string]string)
 	}
 
 	return state
@@ -42,16 +42,15 @@ func (s *SubscriptionState) SetSubscribedResources(subscribedResourceNames map[s
 	s.subscribedResourceNames = subscribedResourceNames
 }
 
-// GetACKedResources returns the list of resources acknowledged by the client
-// and their acknowledged version
-func (s SubscriptionState) GetACKedResources() map[string]string {
-	return s.ackedResources
+// GetKnownResources returns the list of resources sent to the client and their version.
+func (s SubscriptionState) GetKnownResources() map[string]string {
+	return s.knownResources
 }
 
-// SetACKedResources sets a list of resource versions currently known by the client
-// The cache can use this state to compute resources added/updated/deleted
-func (s *SubscriptionState) SetACKedResources(resourceVersions map[string]string) {
-	s.ackedResources = resourceVersions
+// SetKnownResources sets a list of resource versions sent to the client.
+// The cache can use this state to compute resources added/updated/deleted.
+func (s *SubscriptionState) SetKnownResources(resourceVersions map[string]string) {
+	s.knownResources = resourceVersions
 }
 
 // SetWildcard will set the subscription to return all known resources

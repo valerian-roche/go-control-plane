@@ -65,6 +65,36 @@ func verifyResponse(t *testing.T, ch <-chan Response, version string, num int) {
 	}
 }
 
+func verifyResponseResources(t *testing.T, ch <-chan Response, version string, resources ...string) {
+	t.Helper()
+	r := <-ch
+	if r.GetRequest().GetTypeUrl() != testType {
+		t.Errorf("unexpected empty request type URL: %q", r.GetRequest().GetTypeUrl())
+	}
+	if r.GetContext() == nil {
+		t.Errorf("unexpected empty response context")
+	}
+	assert.ElementsMatch(t, resources, r.GetResourceNames(), "unexpected resources")
+
+	out, err := r.GetDiscoveryResponse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.GetVersionInfo() == "" {
+		t.Error("unexpected response empty version")
+	}
+	if n := len(out.GetResources()); n != len(resources) {
+		t.Errorf("unexpected number of responses: got %d, want %d", n, len(resources))
+	}
+
+	if version != "" && out.GetVersionInfo() != version {
+		t.Errorf("unexpected version: got %q, want %q", out.GetVersionInfo(), version)
+	}
+	if out.GetTypeUrl() != testType {
+		t.Errorf("unexpected type URL: %q", out.GetTypeUrl())
+	}
+}
+
 type resourceInfo struct {
 	name    string
 	version string
@@ -195,7 +225,7 @@ func createWildcardDeltaWatch(c *LinearCache, w chan DeltaResponse) error {
 		return err
 	}
 	resp := <-w
-	state.SetACKedResources(resp.GetNextVersionMap())
+	state.SetKnownResources(resp.GetNextVersionMap())
 	_, err := c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, &state, w) // Ensure the watch is set properly with cache values
 	return err
 }
@@ -278,53 +308,62 @@ func TestLinearBasic(t *testing.T) {
 }
 
 func TestLinearSetResources(t *testing.T) {
-	streamState := stream.NewSubscriptionState(false, map[string]string{})
 	c := NewLinearCache(testType)
 
 	// Create new resources
 	w1 := make(chan Response, 1)
-	_, err := c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}, streamState, w1)
+	stream1 := stream.NewSubscriptionState(false, map[string]string{})
+	stream1.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}, "c": {}})
+	_, err := c.CreateWatch(&Request{ResourceNames: []string{"a", "b", "c"}, TypeUrl: testType, VersionInfo: "0"}, stream1, w1)
 	require.NoError(t, err)
 	mustBlock(t, w1)
+
 	w2 := make(chan Response, 1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "0"}, streamState, w2)
+	stream2 := stream.NewSubscriptionState(true, map[string]string{})
+	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "0"}, stream2, w2)
 	require.NoError(t, err)
 	mustBlock(t, w2)
+
 	c.SetResources(map[string]types.Resource{
 		"a": testResource("a"),
 		"b": testResource("b"),
 	})
-	verifyResponse(t, w1, "1", 1)
-	verifyResponse(t, w2, "1", 2) // the version was only incremented once for all resources
+	verifyResponseResources(t, w1, "1", "a", "b")
+	verifyResponseResources(t, w2, "1", "a", "b", "c") // the version was only incremented once for all resources
 
-	// Add another element and update the first, response should be different
-	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "1"}, streamState, w1)
+	// Remove b frp, the watch, no response expected
+	delete(stream1.GetSubscribedResources(), "b")
+	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a", "c"}, TypeUrl: testType, VersionInfo: "1"}, stream1, w1)
 	require.NoError(t, err)
 	mustBlock(t, w1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "1"}, streamState, w2)
+
+	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "1"}, stream2, w2)
 	require.NoError(t, err)
 	mustBlock(t, w2)
+
+	// Update a, don't change b, add c
 	c.SetResources(map[string]types.Resource{
 		"a": testResource("aa"),
 		"b": testResource("b"),
 		"c": testResource("c"),
 	})
-	verifyResponse(t, w1, "2", 1)
-	verifyResponse(t, w2, "2", 3)
+	verifyResponseResources(t, w1, "2", "a", "c")      // Currently return only modified resources, with no regard for type
+	verifyResponseResources(t, w2, "2", "a", "b", "c") // For wildcard currently always return all resources
 
 	// Delete resource
-	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "2"}, streamState, w1)
+	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a", "c"}, TypeUrl: testType, VersionInfo: "2"}, stream1, w1)
 	require.NoError(t, err)
 	mustBlock(t, w1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "2"}, streamState, w2)
+	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "2"}, stream2, w2)
 	require.NoError(t, err)
 	mustBlock(t, w2)
+
 	c.SetResources(map[string]types.Resource{
 		"b": testResource("b"),
 		"c": testResource("c"),
 	})
 	verifyResponse(t, w1, "", 0) // removing a resource from the set triggers existing watches for deleted resources
-	verifyResponse(t, w2, "3", 2)
+	verifyResponseResources(t, w2, "3", "b", "c")
 }
 
 func TestLinearGetResources(t *testing.T) {
@@ -674,7 +713,7 @@ func TestLinearDeltaMultiResourceUpdates(t *testing.T) {
 	validateDeltaResponse(t, resp, []resourceInfo{{"a", hashA}, {"b", hashB}}, nil)
 	checkVersionMapSet(t, c)
 	assert.Equal(t, 2, c.NumResources())
-	state.SetACKedResources(resp.GetNextVersionMap())
+	state.SetKnownResources(resp.GetNextVersionMap())
 
 	// Multiple updates
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, &state, w)
@@ -695,7 +734,7 @@ func TestLinearDeltaMultiResourceUpdates(t *testing.T) {
 	validateDeltaResponse(t, resp, []resourceInfo{{"a", hashA}, {"b", hashB}}, nil)
 	checkVersionMapSet(t, c)
 	assert.Equal(t, 2, c.NumResources())
-	state.SetACKedResources(resp.GetNextVersionMap())
+	state.SetKnownResources(resp.GetNextVersionMap())
 
 	// Update/add/delete
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, &state, w)
@@ -715,7 +754,7 @@ func TestLinearDeltaMultiResourceUpdates(t *testing.T) {
 	validateDeltaResponse(t, resp, []resourceInfo{{"a", hashA}}, []string{"b"})
 	checkVersionMapSet(t, c)
 	assert.Equal(t, 2, c.NumResources())
-	state.SetACKedResources(resp.GetNextVersionMap())
+	state.SetKnownResources(resp.GetNextVersionMap())
 
 	// Re-add previously deleted watched resource
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, &state, w)
@@ -732,7 +771,7 @@ func TestLinearDeltaMultiResourceUpdates(t *testing.T) {
 	validateDeltaResponse(t, resp, []resourceInfo{{"b", hashB}}, nil) // d is not watched and should not be returned
 	checkVersionMapSet(t, c)
 	assert.Equal(t, 2, c.NumResources())
-	state.SetACKedResources(resp.GetNextVersionMap())
+	state.SetKnownResources(resp.GetNextVersionMap())
 
 	// Wildcard create/update
 	require.NoError(t, createWildcardDeltaWatch(c, w))

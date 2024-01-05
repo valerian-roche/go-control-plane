@@ -111,9 +111,11 @@ func (s *Snapshot) Consistent() error {
 					typeURL, referenceSet, len(items.Items))
 			}
 
-			// Check superset.
-			if err := superset(referenceSet, items.Items); err != nil {
-				return fmt.Errorf("inconsistent %q reference: %w", typeURL, err)
+			// Check key match.
+			for reference := range referenceSet {
+				if _, ok := items.Items[reference]; !ok {
+					return fmt.Errorf("inconsistent %q reference: %q not listed", typeURL, reference)
+				}
 			}
 		}
 	}
