@@ -41,7 +41,7 @@ type DeltaRequest = discovery.DeltaDiscoveryRequest
 // Though the methods may return mutable parts of the state for performance reasons,
 // the cache is expected to consider this state as immutable and thread safe between a watch creation and its cancellation.
 type SubscriptionState interface {
-	// GetACKedResources returns a list of resources that the client has ACK'd and their associated version.
+	// GetACKedResources returns a list of resources that clients have ACK'd and their associated version.
 	// The versions are:
 	//  - delta protocol: version of the specific resource set in the response
 	//  - sotw protocol: version of the global response when the resource was last ACKed
