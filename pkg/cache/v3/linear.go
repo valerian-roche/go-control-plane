@@ -27,7 +27,7 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/log"
 )
 
-type watches = map[chan Response]struct{}
+type watches = map[ResponseWatch]struct{}
 
 // LinearCache supports collections of opaque resources. This cache has a
 // single collection indexed by resource names and manages resource versions
@@ -114,15 +114,28 @@ func NewLinearCache(typeURL string, opts ...LinearCacheOption) *LinearCache {
 	return out
 }
 
-func (cache *LinearCache) respond(value chan Response, staleResources []string) {
+func (cache *LinearCache) respond(watch ResponseWatch, staleResources []string) {
 	var resources []types.ResourceWithTTL
 	// TODO: optimize the resources slice creations across different clients
 	if len(staleResources) == 0 {
+		// Wildcard case, we return all resources in the cache
 		resources = make([]types.ResourceWithTTL, 0, len(cache.resources))
 		for _, resource := range cache.resources {
 			resources = append(resources, types.ResourceWithTTL{Resource: resource})
 		}
+	} else if ResourceRequiresFullStateInSotw(cache.typeURL) {
+		// Non-wildcard request for a type requiring full state response
+		// We need to return all requested resources, if existing, for this type
+		requestedResources := watch.Request.GetResourceNames()
+		resources = make([]types.ResourceWithTTL, 0, len(requestedResources))
+		for _, resource := range requestedResources {
+			resource := cache.resources[resource]
+			if resource != nil {
+				resources = append(resources, types.ResourceWithTTL{Resource: resource})
+			}
+		}
 	} else {
+		// Non-wildcard request for other types. Only return stale resources
 		resources = make([]types.ResourceWithTTL, 0, len(staleResources))
 		for _, name := range staleResources {
 			resource := cache.resources[name]
@@ -131,8 +144,8 @@ func (cache *LinearCache) respond(value chan Response, staleResources []string) 
 			}
 		}
 	}
-	value <- &RawResponse{
-		Request:   &Request{TypeUrl: cache.typeURL},
+	watch.Response <- &RawResponse{
+		Request:   watch.Request,
 		Resources: resources,
 		Version:   cache.getVersion(),
 		Ctx:       context.Background(),
@@ -141,18 +154,18 @@ func (cache *LinearCache) respond(value chan Response, staleResources []string) 
 
 func (cache *LinearCache) notifyAll(modified map[string]struct{}) {
 	// de-duplicate watches that need to be responded
-	notifyList := make(map[chan Response][]string)
+	notifyList := make(map[ResponseWatch][]string)
 	for name := range modified {
 		for watch := range cache.watches[name] {
 			notifyList[watch] = append(notifyList[watch], name)
 		}
-		delete(cache.watches, name)
 	}
-	for value, stale := range notifyList {
-		cache.respond(value, stale)
+	for watch, stale := range notifyList {
+		cache.removeWatch(watch)
+		cache.respond(watch, stale)
 	}
-	for value := range cache.watchAll {
-		cache.respond(value, nil)
+	for watch := range cache.watchAll {
+		cache.respond(watch, nil)
 	}
 	cache.watchAll = make(watches)
 
@@ -317,6 +330,8 @@ func (cache *LinearCache) CreateWatch(request *Request, _ Subscription, value ch
 		err = errors.New("mis-matched version prefix")
 	}
 
+	watch := ResponseWatch{Request: request, Response: value}
+
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
@@ -324,8 +339,12 @@ func (cache *LinearCache) CreateWatch(request *Request, _ Subscription, value ch
 	case err != nil:
 		stale = true
 		staleResources = request.GetResourceNames()
+		cache.log.Debugf("Watch is stale as version failed to parse %s", err.Error())
 	case len(request.GetResourceNames()) == 0:
-		stale = lastVersion != cache.version
+		stale = (lastVersion != cache.version)
+		if stale {
+			cache.log.Debugf("Watch is stale as cache version %d differs for wildcard watch %d", cache.version, lastVersion)
+		}
 	default:
 		for _, name := range request.GetResourceNames() {
 			// When a resource is removed, its version defaults 0 and it is not considered stale.
@@ -334,41 +353,52 @@ func (cache *LinearCache) CreateWatch(request *Request, _ Subscription, value ch
 				staleResources = append(staleResources, name)
 			}
 		}
+		if stale {
+			cache.log.Debugf("Watch is stale with stale resources %v", staleResources)
+		}
 	}
 	if stale {
-		cache.respond(value, staleResources)
+		cache.respond(watch, staleResources)
 		return nil, nil
 	}
 	// Create open watches since versions are up to date.
 	if len(request.GetResourceNames()) == 0 {
-		cache.watchAll[value] = struct{}{}
+		cache.log.Infof("[linear cache] open watch for %s all resources, system version %q", cache.typeURL, cache.getVersion())
+		cache.watchAll[watch] = struct{}{}
 		return func() {
 			cache.mu.Lock()
 			defer cache.mu.Unlock()
-			delete(cache.watchAll, value)
+			delete(cache.watchAll, watch)
 		}, nil
 	}
+
+	cache.log.Infof("[linear cache] open watch for %s resources %v, system version %q", cache.typeURL, request.ResourceNames, cache.getVersion())
 	for _, name := range request.GetResourceNames() {
 		set, exists := cache.watches[name]
 		if !exists {
 			set = make(watches)
 			cache.watches[name] = set
 		}
-		set[value] = struct{}{}
+		set[watch] = struct{}{}
 	}
 	return func() {
 		cache.mu.Lock()
 		defer cache.mu.Unlock()
-		for _, name := range request.GetResourceNames() {
-			set, exists := cache.watches[name]
-			if exists {
-				delete(set, value)
-			}
-			if len(set) == 0 {
-				delete(cache.watches, name)
-			}
-		}
+		cache.removeWatch(watch)
 	}, nil
+}
+
+// Must be called under lock
+func (cache *LinearCache) removeWatch(watch ResponseWatch) {
+	// Make sure we clean the watch for ALL resources it might be associated with,
+	// as the channel will no longer be listened to
+	for _, resource := range watch.Request.ResourceNames {
+		resourceWatches := cache.watches[resource]
+		delete(resourceWatches, watch)
+		if len(resourceWatches) == 0 {
+			delete(cache.watches, resource)
+		}
+	}
 }
 
 func (cache *LinearCache) CreateDeltaWatch(request *DeltaRequest, sub Subscription, value chan DeltaResponse) (func(), error) {
