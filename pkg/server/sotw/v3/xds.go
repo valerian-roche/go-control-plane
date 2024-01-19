@@ -27,7 +27,7 @@ func (s *server) process(str stream.Stream, reqCh chan *discovery.DiscoveryReque
 
 		// a collection of stack allocated watches per request type.
 		watches:                newWatches(),
-		streamState:            stream.NewStreamState(false, map[string]string{}),
+		subscriptions:          make(map[string]stream.Subscription),
 		lastDiscoveryResponses: make(map[string]lastDiscoveryResponse),
 	}
 
@@ -116,14 +116,19 @@ func (s *server) process(str stream.Stream, reqCh chan *discovery.DiscoveryReque
 				}
 			}
 
+			typeURL := req.GetTypeUrl()
+			subscription, ok := sw.subscriptions[typeURL]
+			if !ok {
+				subscription = stream.NewSubscription(len(req.GetResourceNames()) == 0, nil)
+			}
+
 			if lastResponse, ok := sw.lastDiscoveryResponses[req.GetTypeUrl()]; ok {
 				if lastResponse.nonce == "" || lastResponse.nonce == nonce {
 					// Let's record Resource names that a client has received.
-					sw.streamState.SetKnownResourceNames(req.GetTypeUrl(), lastResponse.resources)
+					subscription.SetReturnedResources(lastResponse.resources)
 				}
 			}
 
-			typeURL := req.GetTypeUrl()
 			responder := make(chan cache.Response, 1)
 			if w, ok := sw.watches.responders[typeURL]; ok {
 				// We've found a pre-existing watch, lets check and update if needed.
@@ -131,19 +136,29 @@ func (s *server) process(str stream.Stream, reqCh chan *discovery.DiscoveryReque
 				if w.nonce == "" || w.nonce == nonce {
 					w.close()
 
+					cancel, err := s.cache.CreateWatch(req, subscription, responder)
+					if err != nil {
+						return err
+					}
 					sw.watches.addWatch(typeURL, &watch{
-						cancel:   s.cache.CreateWatch(req, sw.streamState, responder),
+						cancel:   cancel,
 						response: responder,
 					})
 				}
 			} else {
 				// No pre-existing watch exists, let's create one.
 				// We need to precompute the watches first then open a watch in the cache.
+				cancel, err := s.cache.CreateWatch(req, subscription, responder)
+				if err != nil {
+					return err
+				}
 				sw.watches.addWatch(typeURL, &watch{
-					cancel:   s.cache.CreateWatch(req, sw.streamState, responder),
+					cancel:   cancel,
 					response: responder,
 				})
 			}
+
+			sw.subscriptions[typeURL] = subscription
 
 			// Recompute the dynamic select cases for this stream.
 			sw.watches.recompute(s.ctx, reqCh)
