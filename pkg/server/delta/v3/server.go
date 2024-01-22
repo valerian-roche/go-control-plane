@@ -12,6 +12,7 @@ import (
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/log"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/config"
 	"github.com/envoyproxy/go-control-plane/pkg/server/stream/v3"
@@ -47,6 +48,13 @@ type server struct {
 
 	// Local configuration flags for individual xDS implementations.
 	opts config.Opts
+}
+
+// WithLogger configures the server logger. Defaults to no logging
+func WithLogger(logger log.Logger) config.XDSOption {
+	return func(o *config.Opts) {
+		o.Logger = logger
+	}
 }
 
 // NewServer creates a delta xDS specific server which utilizes a ConfigWatcher and delta Callbacks.
