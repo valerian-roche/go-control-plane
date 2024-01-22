@@ -103,7 +103,7 @@ func ResourceRequiresFullStateInSotw(typeURL resource.Type) bool {
 	// From https://www.envoyproxy.io/docs/envoy/v1.28.0/api-docs/xds_protocol#grouping-resources-into-responses,
 	// when using sotw the control-plane MUST return all requested resources (or simply all if wildcard)
 	// for some types. This is relied on by xds-grpc which is explicitly requesting clusters and listeners
-	// but expects to receive all existing resources for those types. Missing clusters or listeners are 
+	// but expects to receive all existing resources for those types. Missing clusters or listeners are
 	// considered deleted.
 	switch typeURL {
 	case resource.ClusterType:
@@ -184,7 +184,7 @@ func getResourceReferences(resources map[string]types.ResourceWithTTL, out map[r
 	}
 }
 
-func mapMerge(dst map[string]bool, src map[string]bool) {
+func mapMerge(dst, src map[string]bool) {
 	for k, v := range src {
 		dst[k] = v
 	}
