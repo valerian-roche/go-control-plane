@@ -558,7 +558,7 @@ func TestLinearDeltaExistingResources(t *testing.T) {
 	require.NoError(t, err)
 
 	sub := stream.NewSubscription(false, nil)
-	sub.SetSubscribedResources(map[string]struct{}{"b": {}, "c": {}}) // watching b and c - not interested in a
+	sub.UpdateResourceSubscriptions([]string{"b", "c"}, nil) // watching b and c - not interested in a
 	w := make(chan DeltaResponse, 1)
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
 	require.NoError(t, err)
@@ -566,7 +566,7 @@ func TestLinearDeltaExistingResources(t *testing.T) {
 	verifyDeltaResponse(t, w, []resourceInfo{{"b", hashB}}, []string{})
 
 	sub = stream.NewSubscription(false, nil)
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	sub.UpdateResourceSubscriptions([]string{"a", "b"}, nil)
 	w = make(chan DeltaResponse, 1)
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
 	require.NoError(t, err)
@@ -586,7 +586,7 @@ func TestLinearDeltaInitialResourcesVersionSet(t *testing.T) {
 	require.NoError(t, err)
 
 	sub := stream.NewSubscription(false, map[string]string{"b": hashB})
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	sub.UpdateResourceSubscriptions([]string{"a", "b"}, nil)
 	w := make(chan DeltaResponse, 1)
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
 	require.NoError(t, err)
@@ -594,7 +594,7 @@ func TestLinearDeltaInitialResourcesVersionSet(t *testing.T) {
 	verifyDeltaResponse(t, w, []resourceInfo{{"a", hashA}}, nil) // b is up to date and shouldn't be returned
 
 	sub = stream.NewSubscription(false, map[string]string{"a": hashA, "b": hashB})
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	sub.UpdateResourceSubscriptions([]string{"a", "b"}, nil)
 	w = make(chan DeltaResponse, 1)
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
 	require.NoError(t, err)
@@ -622,7 +622,7 @@ func TestLinearDeltaResourceUpdate(t *testing.T) {
 	checkVersionMapNotSet(t, c)
 
 	sub := stream.NewSubscription(false, nil)
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	sub.UpdateResourceSubscriptions([]string{"a", "b"}, nil)
 	w := make(chan DeltaResponse, 1)
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
 	require.NoError(t, err)
@@ -631,7 +631,7 @@ func TestLinearDeltaResourceUpdate(t *testing.T) {
 	checkVersionMapSet(t, c)
 
 	sub = stream.NewSubscription(false, map[string]string{"a": hashA, "b": hashB})
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	sub.UpdateResourceSubscriptions([]string{"a", "b"}, nil)
 	w = make(chan DeltaResponse, 1)
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
 	require.NoError(t, err)
@@ -660,7 +660,7 @@ func TestLinearDeltaResourceDelete(t *testing.T) {
 	require.NoError(t, err)
 
 	sub := stream.NewSubscription(false, nil)
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	sub.UpdateResourceSubscriptions([]string{"a", "b"}, nil)
 	w := make(chan DeltaResponse, 1)
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
 	require.NoError(t, err)
@@ -668,7 +668,7 @@ func TestLinearDeltaResourceDelete(t *testing.T) {
 	verifyDeltaResponse(t, w, []resourceInfo{{"b", hashB}, {"a", hashA}}, nil)
 
 	sub = stream.NewSubscription(false, map[string]string{"a": hashA, "b": hashB})
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	sub.UpdateResourceSubscriptions([]string{"a", "b"}, nil)
 	w = make(chan DeltaResponse, 1)
 	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
 	require.NoError(t, err)
@@ -687,7 +687,7 @@ func TestLinearDeltaMultiResourceUpdates(t *testing.T) {
 	c := NewLinearCache(testType)
 
 	sub := stream.NewSubscription(false, nil)
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	sub.UpdateResourceSubscriptions([]string{"a", "b"}, nil)
 	w := make(chan DeltaResponse, 1)
 	checkVersionMapNotSet(t, c)
 	assert.Equal(t, 0, c.NumResources())
@@ -838,7 +838,7 @@ func TestLinearMixedWatches(t *testing.T) {
 	checkVersionMapNotSet(t, c)
 
 	deltaSub := stream.NewSubscription(false, map[string]string{"a": hashA, "b": hashB})
-	deltaSub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	deltaSub.UpdateResourceSubscriptions([]string{"a", "b"}, nil)
 	wd := make(chan DeltaResponse, 1)
 
 	// Initial update
