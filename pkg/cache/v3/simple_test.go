@@ -136,7 +136,7 @@ func TestSnapshotCacheWithTTL(t *testing.T) {
 	// All the resources should respond immediately when version is not up to date.
 	subs := map[string]stream.Subscription{}
 	for _, typ := range testTypes {
-		sub := stream.NewSubscription(false, map[string]string{})
+		sub := stream.NewSotwSubscription(names[typ])
 		wg.Add(1)
 		t.Run(typ, func(t *testing.T) {
 			defer wg.Done()
@@ -245,7 +245,7 @@ func TestSnapshotCache(t *testing.T) {
 	// try to get endpoints with incorrect list of names
 	// should not receive response
 	value := make(chan cache.Response, 1)
-	sub := stream.NewSubscription(false, map[string]string{})
+	sub := stream.NewSotwSubscription([]string{"none"})
 	_, err = c.CreateWatch(&discovery.DiscoveryRequest{TypeUrl: rsrc.EndpointType, ResourceNames: []string{"none"}},
 		sub, value)
 	require.NoError(t, err)
@@ -258,7 +258,7 @@ func TestSnapshotCache(t *testing.T) {
 	for _, typ := range testTypes {
 		t.Run(typ, func(t *testing.T) {
 			value := make(chan cache.Response, 1)
-			sub := stream.NewSubscription(false, map[string]string{})
+			sub := stream.NewSotwSubscription(names[typ])
 			_, err = c.CreateWatch(&discovery.DiscoveryRequest{TypeUrl: typ, ResourceNames: names[typ]},
 				sub, value)
 			require.NoError(t, err)
@@ -314,7 +314,7 @@ func TestSnapshotCacheWatch(t *testing.T) {
 	watches := make(map[string]chan cache.Response)
 	subs := map[string]stream.Subscription{}
 	for _, typ := range testTypes {
-		sub := stream.NewSubscription(false, map[string]string{})
+		sub := stream.NewSotwSubscription(names[typ])
 		subs[typ] = sub
 		watches[typ] = make(chan cache.Response, 1)
 		_, err := c.CreateWatch(&discovery.DiscoveryRequest{TypeUrl: typ, ResourceNames: names[typ]}, sub, watches[typ])
@@ -398,7 +398,7 @@ func TestConcurrentSetWatch(t *testing.T) {
 					t.Fatalf("failed to set snapshot %q: %s", id, err)
 				}
 			} else {
-				sub := stream.NewSubscription(false, map[string]string{})
+				sub := stream.NewSotwSubscription(nil)
 				cancel, err := c.CreateWatch(&discovery.DiscoveryRequest{
 					Node:    &core.Node{Id: id},
 					TypeUrl: rsrc.EndpointType,
@@ -413,7 +413,7 @@ func TestConcurrentSetWatch(t *testing.T) {
 func TestSnapshotCacheWatchCancel(t *testing.T) {
 	c := cache.NewSnapshotCache(true, group{}, logger{t: t})
 	for _, typ := range testTypes {
-		sub := stream.NewSubscription(false, map[string]string{})
+		sub := stream.NewSotwSubscription(names[typ])
 		value := make(chan cache.Response, 1)
 		cancel, err := c.CreateWatch(&discovery.DiscoveryRequest{TypeUrl: typ, ResourceNames: names[typ]}, sub, value)
 		require.NoError(t, err)
@@ -440,7 +440,7 @@ func TestSnapshotCacheWatchTimeout(t *testing.T) {
 
 	// Create a non-buffered channel that will block sends.
 	watchCh := make(chan cache.Response)
-	sub := stream.NewSubscription(false, map[string]string{})
+	sub := stream.NewSotwSubscription(names[rsrc.EndpointType])
 	_, err := c.CreateWatch(&discovery.DiscoveryRequest{TypeUrl: rsrc.EndpointType, ResourceNames: names[rsrc.EndpointType]},
 		sub, watchCh)
 	require.NoError(t, err)
@@ -498,7 +498,7 @@ func TestSnapshotCreateWatchWithResourcePreviouslyNotRequested(t *testing.T) {
 	// Request resource with name=ClusterName
 	go func() {
 		_, err := c.CreateWatch(&discovery.DiscoveryRequest{TypeUrl: rsrc.EndpointType, ResourceNames: []string{clusterName}},
-			stream.NewSubscription(false, map[string]string{}), watch)
+			stream.NewSotwSubscription([]string{clusterName}), watch)
 		require.NoError(t, err)
 	}()
 
@@ -517,7 +517,7 @@ func TestSnapshotCreateWatchWithResourcePreviouslyNotRequested(t *testing.T) {
 
 	// Request additional resource with name=clusterName2 for same version
 	go func() {
-		sub := stream.NewSubscription(false, map[string]string{})
+		sub := stream.NewSotwSubscription([]string{clusterName, clusterName2})
 		sub.SetReturnedResources(map[string]string{clusterName: fixture.version})
 		_, err := c.CreateWatch(&discovery.DiscoveryRequest{
 			TypeUrl: rsrc.EndpointType, VersionInfo: fixture.version,
@@ -539,7 +539,7 @@ func TestSnapshotCreateWatchWithResourcePreviouslyNotRequested(t *testing.T) {
 	}
 
 	// Repeat request for with same version and make sure a watch is created
-	sub := stream.NewSubscription(false, map[string]string{})
+	sub := stream.NewSotwSubscription([]string{clusterName, clusterName2})
 	sub.SetReturnedResources(map[string]string{clusterName: fixture.version, clusterName2: fixture.version})
 	cancel, err := c.CreateWatch(&discovery.DiscoveryRequest{
 		TypeUrl: rsrc.EndpointType, VersionInfo: fixture.version,
@@ -675,7 +675,8 @@ func TestAvertPanicForWatchOnNonExistentSnapshot(t *testing.T) {
 		ResourceNames: []string{"rtds"},
 		TypeUrl:       rsrc.RuntimeType,
 	}
-	ss := stream.NewSubscription(false, map[string]string{"cluster": "abcdef"})
+	ss := stream.NewSotwSubscription([]string{"rtds"})
+	ss.SetReturnedResources(map[string]string{"cluster": "abcdef"})
 	responder := make(chan cache.Response)
 	_, err := c.CreateWatch(req, ss, responder)
 	require.NoError(t, err)

@@ -224,6 +224,7 @@ func (cache *snapshotCache) SetSnapshot(ctx context.Context, node string, snapsh
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
+	cache.log.Debugf("setting snapshot for node %s", node)
 	// update the existing entry
 	cache.snapshots[node] = snapshot
 

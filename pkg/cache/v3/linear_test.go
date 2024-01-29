@@ -231,7 +231,7 @@ func hashResource(t *testing.T, resource types.Resource) string {
 
 func createWildcardDeltaWatch(t *testing.T, c *LinearCache, w chan DeltaResponse) {
 	t.Helper()
-	sub := stream.NewSubscription(true, nil)
+	sub := stream.NewDeltaSubscription(nil, nil, nil)
 	_, err := c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
 	require.NoError(t, err)
 	resp := <-w
@@ -240,91 +240,112 @@ func createWildcardDeltaWatch(t *testing.T, c *LinearCache, w chan DeltaResponse
 	require.NoError(t, err)
 }
 
+func subFromRequest(req *Request) stream.Subscription {
+	return stream.NewSotwSubscription(req.GetResourceNames())
+}
+
+func subFromDeltaRequest(req *DeltaRequest) stream.Subscription {
+	return stream.NewDeltaSubscription(req.GetResourceNamesSubscribe(), req.GetResourceNamesUnsubscribe(), req.GetInitialResourceVersions())
+}
+
 func TestLinearInitialResources(t *testing.T) {
-	sub := stream.NewSubscription(false, map[string]string{})
 	c := NewLinearCache(testType, WithInitialResources(map[string]types.Resource{"a": testResource("a"), "b": testResource("b")}))
 	w := make(chan Response, 1)
-	_, err := c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType}, sub, w)
+	req := &Request{ResourceNames: []string{"a"}, TypeUrl: testType}
+	sub := subFromRequest(req)
+	_, err := c.CreateWatch(req, sub, w)
 	require.NoError(t, err)
 	verifyResponse(t, w, "0", 1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType}, sub, w)
+
+	req = &Request{TypeUrl: testType}
+	sub = subFromRequest(req)
+	_, err = c.CreateWatch(req, sub, w)
 	require.NoError(t, err)
 	verifyResponse(t, w, "0", 2)
 	checkVersionMapNotSet(t, c)
 }
 
 func TestLinearCornerCases(t *testing.T) {
-	sub := stream.NewSubscription(false, map[string]string{})
 	c := NewLinearCache(testType)
 	err := c.UpdateResource("a", nil)
 	if err == nil {
 		t.Error("expected error on nil resource")
 	}
 	// create an incorrect type URL request
+	req := &Request{TypeUrl: "test"}
 	w := make(chan Response, 1)
-	_, err = c.CreateWatch(&Request{TypeUrl: "test"}, sub, w)
+	sub := subFromRequest(req)
+	_, err = c.CreateWatch(req, sub, w)
 	require.Error(t, err, "cache should have rejected the watch")
 }
 
 func TestLinearBasic(t *testing.T) {
-	sub := stream.NewSubscription(false, map[string]string{})
 	c := NewLinearCache(testType)
 
 	// Create watches before a resource is ready
 	w1 := make(chan Response, 1)
-	_, err := c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}, sub, w1)
+	req1 := &Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}
+	sub1 := subFromRequest(req1)
+	_, err := c.CreateWatch(req1, sub1, w1)
 	require.NoError(t, err)
 	mustBlock(t, w1)
 	checkVersionMapNotSet(t, c)
 
-	w := make(chan Response, 1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "0"}, sub, w)
+	w2 := make(chan Response, 1)
+	req2 := &Request{TypeUrl: testType, VersionInfo: "0"}
+	sub2 := subFromRequest(req2)
+	_, err = c.CreateWatch(req2, sub2, w2)
 	require.NoError(t, err)
-	mustBlock(t, w)
+	mustBlock(t, w2)
 	checkWatchCount(t, c, "a", 2)
 	checkWatchCount(t, c, "b", 1)
 	require.NoError(t, c.UpdateResource("a", testResource("a")))
 	checkWatchCount(t, c, "a", 0)
 	checkWatchCount(t, c, "b", 0)
 	verifyResponse(t, w1, "1", 1)
-	verifyResponse(t, w, "1", 1)
+	verifyResponse(t, w2, "1", 1)
 
 	// Request again, should get same response
-	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}, sub, w)
+	_, err = c.CreateWatch(req1, sub1, w1)
 	require.NoError(t, err)
 	checkWatchCount(t, c, "a", 0)
-	verifyResponse(t, w, "1", 1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "0"}, sub, w)
+	verifyResponse(t, w1, "1", 1)
+	_, err = c.CreateWatch(req2, sub2, w2)
 	require.NoError(t, err)
 	checkWatchCount(t, c, "a", 0)
-	verifyResponse(t, w, "1", 1)
+	verifyResponse(t, w2, "1", 1)
 
 	// Add another element and update the first, response should be different
 	require.NoError(t, c.UpdateResource("b", testResource("b")))
 	require.NoError(t, c.UpdateResource("a", testResource("aa")))
-	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}, sub, w)
+	_, err = c.CreateWatch(req1, sub1, w1)
 	require.NoError(t, err)
-	verifyResponse(t, w, "3", 1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "0"}, sub, w)
+	verifyResponse(t, w1, "3", 1)
+	_, err = c.CreateWatch(req2, sub2, w2)
 	require.NoError(t, err)
-	verifyResponse(t, w, "3", 2)
+	verifyResponse(t, w2, "3", 2)
 	// Ensure the version map was not created as we only ever used stow watches
 	checkVersionMapNotSet(t, c)
 }
 
 func TestLinearSetResources(t *testing.T) {
-	sub := stream.NewSubscription(false, map[string]string{})
 	c := NewLinearCache(testType)
 
 	// Create new resources
 	w1 := make(chan Response, 1)
-	_, err := c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}, sub, w1)
+	req1 := &Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}
+	sub1 := subFromRequest(req1)
+	_, err := c.CreateWatch(req1, sub1, w1)
 	require.NoError(t, err)
 	mustBlock(t, w1)
+
 	w2 := make(chan Response, 1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "0"}, sub, w2)
+	req2 := &Request{TypeUrl: testType, VersionInfo: "0"}
+	sub2 := subFromRequest(req2)
+	_, err = c.CreateWatch(req2, sub2, w2)
 	require.NoError(t, err)
 	mustBlock(t, w2)
+
 	c.SetResources(map[string]types.Resource{
 		"a": testResource("a"),
 		"b": testResource("b"),
@@ -333,12 +354,15 @@ func TestLinearSetResources(t *testing.T) {
 	verifyResponse(t, w2, "1", 2) // the version was only incremented once for all resources
 
 	// Add another element and update the first, response should be different
-	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "1"}, sub, w1)
+	req1.VersionInfo = "1"
+	_, err = c.CreateWatch(req1, sub1, w1)
 	require.NoError(t, err)
 	mustBlock(t, w1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "1"}, sub, w2)
+	req2.VersionInfo = "1"
+	_, err = c.CreateWatch(req2, sub2, w2)
 	require.NoError(t, err)
 	mustBlock(t, w2)
+
 	c.SetResources(map[string]types.Resource{
 		"a": testResource("aa"),
 		"b": testResource("b"),
@@ -348,12 +372,15 @@ func TestLinearSetResources(t *testing.T) {
 	verifyResponse(t, w2, "2", 3)
 
 	// Delete resource
-	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "2"}, sub, w1)
+	req1.VersionInfo = "2"
+	_, err = c.CreateWatch(req1, sub1, w1)
 	require.NoError(t, err)
 	mustBlock(t, w1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "2"}, sub, w2)
+	req2.VersionInfo = "2"
+	_, err = c.CreateWatch(req2, sub2, w2)
 	require.NoError(t, err)
 	mustBlock(t, w2)
+
 	c.SetResources(map[string]types.Resource{
 		"b": testResource("b"),
 		"c": testResource("c"),
@@ -380,82 +407,103 @@ func TestLinearGetResources(t *testing.T) {
 }
 
 func TestLinearVersionPrefix(t *testing.T) {
-	sub := stream.NewSubscription(false, map[string]string{})
 	c := NewLinearCache(testType, WithVersionPrefix("instance1-"))
 
 	w := make(chan Response, 1)
-	_, err := c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}, sub, w)
+	req := &Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}
+	sub := subFromRequest(req)
+	_, err := c.CreateWatch(req, sub, w)
 	require.NoError(t, err)
 	verifyResponse(t, w, "instance1-0", 0)
 
 	require.NoError(t, c.UpdateResource("a", testResource("a")))
-	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}, sub, w)
+
+	req.VersionInfo = "instance1-0"
+	_, err = c.CreateWatch(req, sub, w)
 	require.NoError(t, err)
 	verifyResponse(t, w, "instance1-1", 1)
 
-	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "instance1-1"}, sub, w)
+	req.VersionInfo = "instance1-1"
+	_, err = c.CreateWatch(req, sub, w)
 	require.NoError(t, err)
 	mustBlock(t, w)
 	checkWatchCount(t, c, "a", 1)
 }
 
 func TestLinearDeletion(t *testing.T) {
-	sub := stream.NewSubscription(false, map[string]string{})
 	c := NewLinearCache(testType, WithInitialResources(map[string]types.Resource{"a": testResource("a"), "b": testResource("b")}))
 	w := make(chan Response, 1)
-	_, err := c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}, sub, w)
+	req := &Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}
+	sub := subFromRequest(req)
+	_, err := c.CreateWatch(req, sub, w)
 	require.NoError(t, err)
 	mustBlock(t, w)
 	checkWatchCount(t, c, "a", 1)
+
 	require.NoError(t, c.DeleteResource("a"))
 	verifyResponse(t, w, "1", 0)
 	checkWatchCount(t, c, "a", 0)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "0"}, sub, w)
+
+	req = &Request{TypeUrl: testType, VersionInfo: "0"}
+	sub = subFromRequest(req)
+	_, err = c.CreateWatch(req, sub, w)
 	require.NoError(t, err)
 	verifyResponse(t, w, "1", 1)
 	checkWatchCount(t, c, "b", 0)
 	require.NoError(t, c.DeleteResource("b"))
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "1"}, sub, w)
+
+	req.VersionInfo = "1"
+	_, err = c.CreateWatch(req, sub, w)
 	require.NoError(t, err)
 	verifyResponse(t, w, "2", 0)
 	checkWatchCount(t, c, "b", 0)
 }
 
 func TestLinearWatchTwo(t *testing.T) {
-	sub := stream.NewSubscription(false, map[string]string{})
 	c := NewLinearCache(testType, WithInitialResources(map[string]types.Resource{"a": testResource("a"), "b": testResource("b")}))
-	w := make(chan Response, 1)
-	_, err := c.CreateWatch(&Request{ResourceNames: []string{"a", "b"}, TypeUrl: testType, VersionInfo: "0"}, sub, w)
-	require.NoError(t, err)
-	mustBlock(t, w)
+
 	w1 := make(chan Response, 1)
-	_, err = c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "0"}, sub, w1)
+	req1 := &Request{ResourceNames: []string{"a", "b"}, TypeUrl: testType, VersionInfo: "0"}
+	sub1 := subFromRequest(req1)
+	_, err := c.CreateWatch(req1, sub1, w1)
 	require.NoError(t, err)
 	mustBlock(t, w1)
+
+	w2 := make(chan Response, 1)
+	req2 := &Request{TypeUrl: testType, VersionInfo: "0"}
+	sub2 := subFromRequest(req2)
+	_, err = c.CreateWatch(req2, sub2, w2)
+	require.NoError(t, err)
+	mustBlock(t, w2)
+
 	require.NoError(t, c.UpdateResource("a", testResource("aa")))
 	// should only get the modified resource
-	verifyResponse(t, w, "1", 1)
-	verifyResponse(t, w1, "1", 2)
+	verifyResponse(t, w1, "1", 1)
+	verifyResponse(t, w2, "1", 2)
 }
 
 func TestLinearCancel(t *testing.T) {
-	sub := stream.NewSubscription(false, map[string]string{})
 	c := NewLinearCache(testType)
 	require.NoError(t, c.UpdateResource("a", testResource("a")))
 
 	// cancel watch-all
-	w := make(chan Response, 1)
-	cancel, err := c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "1"}, sub, w)
+	w1 := make(chan Response, 1)
+	req1 := &Request{TypeUrl: testType, VersionInfo: "1"}
+	sub1 := subFromRequest(req1)
+	cancel, err := c.CreateWatch(req1, sub1, w1)
 	require.NoError(t, err)
-	mustBlock(t, w)
+	mustBlock(t, w1)
 	checkWatchCount(t, c, "a", 1)
 	cancel()
 	checkWatchCount(t, c, "a", 0)
 
 	// cancel watch for "a"
-	cancel, err = c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "1"}, sub, w)
+	sub1.SetResourceSubscription([]string{"a"})
+	req1.ResourceNames = []string{"a"}
+	req1.VersionInfo = "1"
+	cancel, err = c.CreateWatch(req1, sub1, w1)
 	require.NoError(t, err)
-	mustBlock(t, w)
+	mustBlock(t, w1)
 	checkWatchCount(t, c, "a", 1)
 	cancel()
 	checkWatchCount(t, c, "a", 0)
@@ -464,15 +512,19 @@ func TestLinearCancel(t *testing.T) {
 	w2 := make(chan Response, 1)
 	w3 := make(chan Response, 1)
 	w4 := make(chan Response, 1)
-	cancel, err = c.CreateWatch(&Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "1"}, sub, w)
+	cancel, err = c.CreateWatch(req1, sub1, w1)
 	require.NoError(t, err)
-	cancel2, err := c.CreateWatch(&Request{ResourceNames: []string{"b"}, TypeUrl: testType, VersionInfo: "1"}, sub, w2)
+
+	req2 := &Request{ResourceNames: []string{"b"}, TypeUrl: testType, VersionInfo: "1"}
+	cancel2, err := c.CreateWatch(req2, subFromRequest(req2), w2)
 	require.NoError(t, err)
-	cancel3, err := c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "1"}, sub, w3)
+	req3 := &Request{TypeUrl: testType, VersionInfo: "1"}
+	cancel3, err := c.CreateWatch(req3, subFromRequest(req3), w3)
 	require.NoError(t, err)
-	cancel4, err := c.CreateWatch(&Request{TypeUrl: testType, VersionInfo: "1"}, sub, w4)
+	req4 := &Request{TypeUrl: testType, VersionInfo: "1"}
+	cancel4, err := c.CreateWatch(req4, subFromRequest(req4), w4)
 	require.NoError(t, err)
-	mustBlock(t, w)
+	mustBlock(t, w1)
 	mustBlock(t, w2)
 	mustBlock(t, w3)
 	mustBlock(t, w4)
@@ -493,7 +545,6 @@ func TestLinearCancel(t *testing.T) {
 // TODO(mattklein123): This test requires GOMAXPROCS or -parallel >= 100. This should be
 // rewritten to not require that. This is not the case in the GH actions environment.
 func TestLinearConcurrentSetWatch(t *testing.T) {
-	sub := stream.NewSubscription(false, map[string]string{})
 	c := NewLinearCache(testType)
 	n := 50
 	for i := 0; i < 2*n; i++ {
@@ -508,12 +559,13 @@ func TestLinearConcurrentSetWatch(t *testing.T) {
 					id2 := fmt.Sprintf("%d", i-1)
 					t.Logf("request resources %q and %q", id, id2)
 					value := make(chan Response, 1)
-					_, err := c.CreateWatch(&Request{
+					req := &Request{
 						// Only expect one to become stale
 						ResourceNames: []string{id, id2},
 						VersionInfo:   "0",
 						TypeUrl:       testType,
-					}, sub, value)
+					}
+					_, err := c.CreateWatch(req, subFromRequest(req), value)
 					require.NoError(t, err)
 					// wait until all updates apply
 					verifyResponse(t, value, "", 1)
@@ -525,14 +577,15 @@ func TestLinearConcurrentSetWatch(t *testing.T) {
 
 func TestLinearDeltaWildcard(t *testing.T) {
 	c := NewLinearCache(testType)
-	sub1 := stream.NewSubscription(true, map[string]string{})
+	req1 := &DeltaRequest{TypeUrl: testType}
 	w1 := make(chan DeltaResponse, 1)
-	_, err := c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub1, w1)
+	_, err := c.CreateDeltaWatch(req1, subFromDeltaRequest(req1), w1)
 	require.NoError(t, err)
 	mustBlockDelta(t, w1)
-	sub2 := stream.NewSubscription(true, map[string]string{})
+
+	req2 := &DeltaRequest{TypeUrl: testType}
 	w2 := make(chan DeltaResponse, 1)
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub2, w2)
+	_, err = c.CreateDeltaWatch(req2, subFromDeltaRequest(req2), w2)
 	require.NoError(t, err)
 	mustBlockDelta(t, w1)
 	checkDeltaWatchCount(t, c, 2)
@@ -557,18 +610,17 @@ func TestLinearDeltaExistingResources(t *testing.T) {
 	err = c.UpdateResource("b", b)
 	require.NoError(t, err)
 
-	sub := stream.NewSubscription(false, nil)
-	sub.SetSubscribedResources(map[string]struct{}{"b": {}, "c": {}}) // watching b and c - not interested in a
+	// watching b and c - not interested in a
+	req := &DeltaRequest{TypeUrl: testType, ResourceNamesSubscribe: []string{"b", "c"}}
 	w := make(chan DeltaResponse, 1)
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	_, err = c.CreateDeltaWatch(req, subFromDeltaRequest(req), w)
 	require.NoError(t, err)
 	checkDeltaWatchCount(t, c, 0)
 	verifyDeltaResponse(t, w, []resourceInfo{{"b", hashB}}, []string{})
 
-	sub = stream.NewSubscription(false, nil)
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	req = &DeltaRequest{TypeUrl: testType, ResourceNamesSubscribe: []string{"a", "b"}}
 	w = make(chan DeltaResponse, 1)
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	_, err = c.CreateDeltaWatch(req, subFromDeltaRequest(req), w)
 	require.NoError(t, err)
 	checkDeltaWatchCount(t, c, 0)
 	verifyDeltaResponse(t, w, []resourceInfo{{"b", hashB}, {"a", hashA}}, nil)
@@ -585,18 +637,16 @@ func TestLinearDeltaInitialResourcesVersionSet(t *testing.T) {
 	err = c.UpdateResource("b", b)
 	require.NoError(t, err)
 
-	sub := stream.NewSubscription(false, map[string]string{"b": hashB})
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	req := &DeltaRequest{TypeUrl: testType, ResourceNamesSubscribe: []string{"a", "b"}, InitialResourceVersions: map[string]string{"b": hashB}}
 	w := make(chan DeltaResponse, 1)
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	_, err = c.CreateDeltaWatch(req, subFromDeltaRequest(req), w)
 	require.NoError(t, err)
 	checkDeltaWatchCount(t, c, 0)
 	verifyDeltaResponse(t, w, []resourceInfo{{"a", hashA}}, nil) // b is up to date and shouldn't be returned
 
-	sub = stream.NewSubscription(false, map[string]string{"a": hashA, "b": hashB})
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	req = &DeltaRequest{TypeUrl: testType, ResourceNamesSubscribe: []string{"a", "b"}, InitialResourceVersions: map[string]string{"a": hashA, "b": hashB}}
 	w = make(chan DeltaResponse, 1)
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	_, err = c.CreateDeltaWatch(req, subFromDeltaRequest(req), w)
 	require.NoError(t, err)
 	mustBlockDelta(t, w)
 	checkDeltaWatchCount(t, c, 1)
@@ -621,19 +671,17 @@ func TestLinearDeltaResourceUpdate(t *testing.T) {
 	// There is currently no delta watch
 	checkVersionMapNotSet(t, c)
 
-	sub := stream.NewSubscription(false, nil)
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	req := &DeltaRequest{TypeUrl: testType, ResourceNamesSubscribe: []string{"a", "b"}}
 	w := make(chan DeltaResponse, 1)
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	_, err = c.CreateDeltaWatch(req, subFromDeltaRequest(req), w)
 	require.NoError(t, err)
 	checkDeltaWatchCount(t, c, 0)
 	verifyDeltaResponse(t, w, []resourceInfo{{"b", hashB}, {"a", hashA}}, nil)
 	checkVersionMapSet(t, c)
 
-	sub = stream.NewSubscription(false, map[string]string{"a": hashA, "b": hashB})
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	req = &DeltaRequest{TypeUrl: testType, ResourceNamesSubscribe: []string{"a", "b"}, InitialResourceVersions: map[string]string{"a": hashA, "b": hashB}}
 	w = make(chan DeltaResponse, 1)
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	_, err = c.CreateDeltaWatch(req, subFromDeltaRequest(req), w)
 	require.NoError(t, err)
 	mustBlockDelta(t, w)
 	checkDeltaWatchCount(t, c, 1)
@@ -659,18 +707,16 @@ func TestLinearDeltaResourceDelete(t *testing.T) {
 	err = c.UpdateResource("b", b)
 	require.NoError(t, err)
 
-	sub := stream.NewSubscription(false, nil)
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	req := &DeltaRequest{TypeUrl: testType, ResourceNamesSubscribe: []string{"a", "b"}}
 	w := make(chan DeltaResponse, 1)
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	_, err = c.CreateDeltaWatch(req, subFromDeltaRequest(req), w)
 	require.NoError(t, err)
 	checkDeltaWatchCount(t, c, 0)
 	verifyDeltaResponse(t, w, []resourceInfo{{"b", hashB}, {"a", hashA}}, nil)
 
-	sub = stream.NewSubscription(false, map[string]string{"a": hashA, "b": hashB})
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	req = &DeltaRequest{TypeUrl: testType, ResourceNamesSubscribe: []string{"a", "b"}, InitialResourceVersions: map[string]string{"a": hashA, "b": hashB}}
 	w = make(chan DeltaResponse, 1)
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	_, err = c.CreateDeltaWatch(req, subFromDeltaRequest(req), w)
 	require.NoError(t, err)
 	mustBlockDelta(t, w)
 	checkDeltaWatchCount(t, c, 1)
@@ -686,14 +732,14 @@ func TestLinearDeltaResourceDelete(t *testing.T) {
 func TestLinearDeltaMultiResourceUpdates(t *testing.T) {
 	c := NewLinearCache(testType)
 
-	sub := stream.NewSubscription(false, nil)
-	sub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
 	w := make(chan DeltaResponse, 1)
 	checkVersionMapNotSet(t, c)
 	assert.Equal(t, 0, c.NumResources())
 
 	// Initial update
-	_, err := c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	req := &DeltaRequest{TypeUrl: testType, ResourceNamesSubscribe: []string{"a", "b"}}
+	sub := subFromDeltaRequest(req)
+	_, err := c.CreateDeltaWatch(req, subFromDeltaRequest(req), w)
 	require.NoError(t, err)
 	mustBlockDelta(t, w)
 	checkDeltaWatchCount(t, c, 1)
@@ -709,10 +755,12 @@ func TestLinearDeltaMultiResourceUpdates(t *testing.T) {
 	validateDeltaResponse(t, resp, []resourceInfo{{"a", hashA}, {"b", hashB}}, nil)
 	checkVersionMapSet(t, c)
 	assert.Equal(t, 2, c.NumResources())
+
 	sub.SetReturnedResources(resp.GetNextVersionMap())
 
 	// Multiple updates
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	req.ResourceNamesSubscribe = nil // No change in subscription
+	_, err = c.CreateDeltaWatch(req, sub, w)
 	require.NoError(t, err)
 	mustBlockDelta(t, w)
 	checkDeltaWatchCount(t, c, 1)
@@ -733,7 +781,7 @@ func TestLinearDeltaMultiResourceUpdates(t *testing.T) {
 	sub.SetReturnedResources(resp.GetNextVersionMap())
 
 	// Update/add/delete
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	_, err = c.CreateDeltaWatch(req, sub, w)
 	require.NoError(t, err)
 	mustBlockDelta(t, w)
 	checkDeltaWatchCount(t, c, 1)
@@ -753,7 +801,7 @@ func TestLinearDeltaMultiResourceUpdates(t *testing.T) {
 	sub.SetReturnedResources(resp.GetNextVersionMap())
 
 	// Re-add previously deleted watched resource
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, sub, w)
+	_, err = c.CreateDeltaWatch(req, sub, w)
 	require.NoError(t, err)
 	mustBlockDelta(t, w)
 	checkDeltaWatchCount(t, c, 1)
@@ -815,9 +863,10 @@ func TestLinearMixedWatches(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, c.NumResources())
 
-	sotwSub := stream.NewSubscription(false, nil)
 	w := make(chan Response, 1)
-	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a", "b"}, TypeUrl: testType, VersionInfo: c.getVersion()}, sotwSub, w)
+	sotwReq := &Request{ResourceNames: []string{"a", "b"}, TypeUrl: testType, VersionInfo: c.getVersion()}
+	sotwSub := subFromRequest(sotwReq)
+	_, err = c.CreateWatch(sotwReq, subFromRequest(sotwReq), w)
 	require.NoError(t, err)
 	mustBlock(t, w)
 	checkVersionMapNotSet(t, c)
@@ -832,17 +881,17 @@ func TestLinearMixedWatches(t *testing.T) {
 	verifyResponse(t, w, c.getVersion(), 1)
 	checkVersionMapNotSet(t, c)
 
-	_, err = c.CreateWatch(&Request{ResourceNames: []string{"a", "b"}, TypeUrl: testType, VersionInfo: c.getVersion()}, sotwSub, w)
+	sotwReq.VersionInfo = c.getVersion()
+	_, err = c.CreateWatch(sotwReq, sotwSub, w)
 	require.NoError(t, err)
 	mustBlock(t, w)
 	checkVersionMapNotSet(t, c)
 
-	deltaSub := stream.NewSubscription(false, map[string]string{"a": hashA, "b": hashB})
-	deltaSub.SetSubscribedResources(map[string]struct{}{"a": {}, "b": {}})
+	deltaReq := &DeltaRequest{TypeUrl: testType, ResourceNamesSubscribe: []string{"a", "b"}, InitialResourceVersions: map[string]string{"a": hashA, "b": hashB}}
 	wd := make(chan DeltaResponse, 1)
 
 	// Initial update
-	_, err = c.CreateDeltaWatch(&DeltaRequest{TypeUrl: testType}, deltaSub, wd)
+	_, err = c.CreateDeltaWatch(deltaReq, subFromDeltaRequest(deltaReq), wd)
 	require.NoError(t, err)
 	mustBlockDelta(t, wd)
 	checkDeltaWatchCount(t, c, 1)
@@ -871,9 +920,10 @@ func TestLinearSotwWatches(t *testing.T) {
 		// An update is done for the three objects in a row
 		// If the watches are no properly purged, all three updates will send responses in the channel, but only the first one is tracked
 		// The buffer will therefore saturate and the third request will deadlock the entire cache as occurring under the mutex
-		sotwSub := stream.NewSubscription(false, nil)
 		w := make(chan Response, 1)
-		_, err = cache.CreateWatch(&Request{ResourceNames: []string{"a", "b", "c"}, TypeUrl: testType, VersionInfo: cache.getVersion()}, sotwSub, w)
+		sotwReq := &Request{ResourceNames: []string{"a", "b", "c"}, TypeUrl: testType, VersionInfo: cache.getVersion()}
+		sotwSub := subFromRequest(sotwReq)
+		_, err = cache.CreateWatch(sotwReq, sotwSub, w)
 		require.NoError(t, err)
 		mustBlock(t, w)
 		checkVersionMapNotSet(t, cache)
@@ -897,7 +947,10 @@ func TestLinearSotwWatches(t *testing.T) {
 
 		// c no longer watched
 		w = make(chan Response, 1)
-		_, err = cache.CreateWatch(&Request{ResourceNames: []string{"a", "b"}, TypeUrl: testType, VersionInfo: cache.getVersion()}, sotwSub, w)
+		sotwReq.ResourceNames = []string{"a", "b"}
+		sotwReq.VersionInfo = cache.getVersion()
+		sotwSub.SetResourceSubscription([]string{"a", "b"})
+		_, err = cache.CreateWatch(sotwReq, sotwSub, w)
 		require.NoError(t, err)
 		mustBlock(t, w)
 		checkVersionMapNotSet(t, cache)
@@ -916,7 +969,10 @@ func TestLinearSotwWatches(t *testing.T) {
 		checkVersionMapNotSet(t, cache)
 
 		w = make(chan Response, 1)
-		_, err = cache.CreateWatch(&Request{ResourceNames: []string{"c"}, TypeUrl: testType, VersionInfo: cache.getVersion()}, sotwSub, w)
+		sotwReq.ResourceNames = []string{"c"}
+		sotwReq.VersionInfo = cache.getVersion()
+		sotwSub.SetResourceSubscription([]string{"c"})
+		_, err = cache.CreateWatch(sotwReq, sotwSub, w)
 		require.NoError(t, err)
 		mustBlock(t, w)
 		checkVersionMapNotSet(t, cache)
@@ -947,25 +1003,28 @@ func TestLinearSotwWatches(t *testing.T) {
 		assert.Equal(t, 3, cache.NumResources())
 
 		// Non-wildcard request
-		nonWildcardSub := stream.NewSubscription(false, nil)
+		nonWildcardReq := &Request{ResourceNames: []string{"a", "b", "d"}, TypeUrl: resource.ClusterType, VersionInfo: cache.getVersion()}
+		nonWildcardSub := subFromRequest(nonWildcardReq)
 		w1 := make(chan Response, 1)
-		_, err := cache.CreateWatch(&Request{ResourceNames: []string{"a", "b", "d"}, TypeUrl: resource.ClusterType, VersionInfo: cache.getVersion()}, nonWildcardSub, w1)
+		_, err := cache.CreateWatch(nonWildcardReq, nonWildcardSub, w1)
 		require.NoError(t, err)
 		mustBlock(t, w1)
 		checkVersionMapNotSet(t, cache)
 
 		// wildcard request
-		wildcardSub := stream.NewSubscription(true, nil)
+		wildcardReq := &Request{ResourceNames: nil, TypeUrl: resource.ClusterType, VersionInfo: cache.getVersion()}
+		wildcardSub := subFromRequest(wildcardReq)
 		w2 := make(chan Response, 1)
-		_, err = cache.CreateWatch(&Request{ResourceNames: nil, TypeUrl: resource.ClusterType, VersionInfo: cache.getVersion()}, wildcardSub, w2)
+		_, err = cache.CreateWatch(wildcardReq, wildcardSub, w2)
 		require.NoError(t, err)
 		mustBlock(t, w2)
 		checkVersionMapNotSet(t, cache)
 
 		// request not requesting b
-		otherSub := stream.NewSubscription(false, nil)
+		otherReq := &Request{ResourceNames: []string{"a", "c", "d"}, TypeUrl: resource.ClusterType, VersionInfo: cache.getVersion()}
+		otherSub := subFromRequest(otherReq)
 		w3 := make(chan Response, 1)
-		_, err = cache.CreateWatch(&Request{ResourceNames: []string{"a", "c", "d"}, TypeUrl: resource.ClusterType, VersionInfo: cache.getVersion()}, otherSub, w3)
+		_, err = cache.CreateWatch(otherReq, otherSub, w3)
 		require.NoError(t, err)
 		mustBlock(t, w3)
 		checkVersionMapNotSet(t, cache)
@@ -982,11 +1041,13 @@ func TestLinearSotwWatches(t *testing.T) {
 
 		// Recreate the watches
 		w1 = make(chan Response, 1)
-		_, err = cache.CreateWatch(&Request{ResourceNames: []string{"a", "b", "d"}, TypeUrl: resource.ClusterType, VersionInfo: cache.getVersion()}, nonWildcardSub, w1)
+		nonWildcardReq.VersionInfo = cache.getVersion()
+		_, err = cache.CreateWatch(nonWildcardReq, nonWildcardSub, w1)
 		require.NoError(t, err)
 		mustBlock(t, w1)
 		w2 = make(chan Response, 1)
-		_, err = cache.CreateWatch(&Request{ResourceNames: nil, TypeUrl: resource.ClusterType, VersionInfo: cache.getVersion()}, wildcardSub, w2)
+		wildcardReq.VersionInfo = cache.getVersion()
+		_, err = cache.CreateWatch(wildcardReq, wildcardSub, w2)
 		require.NoError(t, err)
 		mustBlock(t, w2)
 
