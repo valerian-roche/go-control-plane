@@ -40,7 +40,9 @@ type LinearCache struct {
 	// Watches open by clients, indexed by resource name. Whenever resources
 	// are changed, the watch is triggered.
 	watches map[string]map[int64]ResponseWatch
-	// Set of watches for all resources in the collection
+	// Set of watches for all resources in the collection, indexed by watch id.
+	// watch id is unique for sotw watches and is used to index them without requiring
+	// the watch itself to be hashable, as well as making logs easier to correlate.
 	watchAll map[int64]ResponseWatch
 	// Continuously incremented counter used to index sotw watches.
 	sotwWatchCount int64
@@ -128,18 +130,19 @@ func (cache *LinearCache) computeSotwResponse(watch ResponseWatch, ignoreReturne
 		for resourceName, version := range cache.versionVector {
 			knownVersion, ok := knownVersions[resourceName]
 			if !ok {
-				// This resource is not yet known by the client (added or the client has a stale view)
+				// This resource is not yet known by the client (new resource added in the cache or newly subscribed).
 				changedResources = append(changedResources, resourceName)
 			} else if knownVersion != version {
-				// Outdated version
+				// The client knows an outdated version.
 				changedResources = append(changedResources, resourceName)
 			}
 		}
 
-		// Negative check to retrieve resources that would have been removed
+		// Negative check to identify resources that have been removed in the cache.
+		// Sotw does not support returning "deletions", but in the case of full state resources
+		// a response must then be returned.
 		for resourceName := range knownVersions {
 			if _, ok := cache.versionVector[resourceName]; !ok {
-				// Known resource no longer exists.
 				removedResources = append(removedResources, resourceName)
 			}
 		}
@@ -149,27 +152,27 @@ func (cache *LinearCache) computeSotwResponse(watch ResponseWatch, ignoreReturne
 			knownVersion, known := knownVersions[resourceName]
 			if !exists {
 				if known {
-					// This resource was removed and is no longer known. If the type requires full state
-					// we need to return to make it aware
+					// This resource was removed from the cache. If the type requires full state
+					// we need to return a response.
 					removedResources = append(removedResources, resourceName)
 				}
 				continue
 			}
 
 			if !known {
-				// This resource is not yet known by the client (added or the client has a stale view)
+				// This resource is not yet known by the client (new resource added in the cache or newly subscribed).
 				changedResources = append(changedResources, resourceName)
 			} else if knownVersion != version {
-				// Outdated version
+				// The client knows an outdated version.
 				changedResources = append(changedResources, resourceName)
 			}
 		}
 
 		for resourceName := range knownVersions {
-			// If the subscription no longer watches a resource, we mark it as unknown on the client side to ensure it will
-			// be resent to the client if subscribing again later on.
+			// If the subscription no longer watches a resource,
+			// we mark it as unknown on the client side to ensure it will be resent to the client if subscribing again later on.
 			if _, ok := watch.subscription.SubscribedResources()[resourceName]; !ok {
-				delete(knownVersions, resourceName)
+				removedResources = append(removedResources, resourceName)
 			}
 		}
 	}
@@ -191,7 +194,10 @@ func (cache *LinearCache) computeSotwResponse(watch ResponseWatch, ignoreReturne
 	switch {
 	// Depending on the type, the response will only include changed resources or all of them
 	case !ResourceRequiresFullStateInSotw(cache.typeURL):
-		// changedResources is already filtered based on the subscription
+		// changedResources is already filtered based on the subscription.
+		// TODO(valerian-roche): if the only change is a removal in the subscription,
+		// or a watched resource getting deleted, this might send an empty reply.
+		// While this does not violate the protocol, we might want to avoid it.
 		resources = make([]types.ResourceWithTTL, 0, len(changedResources))
 		for _, resourceName := range changedResources {
 			resources = append(resources, types.ResourceWithTTL{Resource: cache.resources[resourceName]})
@@ -205,9 +211,11 @@ func (cache *LinearCache) computeSotwResponse(watch ResponseWatch, ignoreReturne
 			returnedVersions[resourceName] = cache.versionVector[resourceName]
 		}
 	default:
+		// Include all resources matching the subscription, with no concern on whether
+		// it has been updated or not.
 		requestedResources := watch.subscription.SubscribedResources()
 		// The linear cache could be very large (e.g. containing all potential CLAs)
-		// Therefore drive on the subscription requested resources.
+		// Therefore drives on the subscription requested resources.
 		resources = make([]types.ResourceWithTTL, 0, len(requestedResources))
 		for resourceName := range requestedResources {
 			resource, ok := cache.resources[resourceName]
@@ -219,10 +227,18 @@ func (cache *LinearCache) computeSotwResponse(watch ResponseWatch, ignoreReturne
 		}
 	}
 
-	// Cleanup resources no longer existing in the cache.
-	// In sotw we cannot return those, but this ensures we detect unsubscription then resubscription
+	// Cleanup resources no longer existing in the cache or no longer subscribed.
+	// In sotw we cannot return those if not full state,
+	// but this ensures we detect unsubscription then resubscription.
 	for _, resourceName := range removedResources {
 		delete(returnedVersions, resourceName)
+	}
+
+	if !ignoreReturnedResources && !ResourceRequiresFullStateInSotw(cache.typeURL) && len(resources) == 0 {
+		// If the request is not the initial one, and the type for not require full updates,
+		// do not return if noting is to be set
+		// For full-state resources an empty response does have a semantic meaning
+		return nil
 	}
 
 	return &RawResponse{
@@ -238,27 +254,27 @@ func (cache *LinearCache) notifyAll(modified map[string]struct{}) {
 	// Gather the list of non-wildcard watches impacted by the modified resources.
 	watches := make(map[int64]ResponseWatch)
 	for name := range modified {
-		for watchId, watch := range cache.watches[name] {
-			watches[watchId] = watch
+		for watchID, watch := range cache.watches[name] {
+			watches[watchID] = watch
 		}
 	}
-	for watchId, watch := range watches {
+	for watchID, watch := range watches {
 		response := cache.computeSotwResponse(watch, false)
 		if response != nil {
 			watch.Response <- response
-			cache.removeWatch(watchId, watch.subscription)
+			cache.removeWatch(watchID, watch.subscription)
 		} else {
-			cache.log.Warnf("[Linear cache] Watch %d detected as triggered did not get notified", watchId)
+			cache.log.Warnf("[Linear cache] Watch %d detected as triggered did not get notified", watchID)
 		}
 	}
 
-	for watchId, watch := range cache.watchAll {
+	for watchID, watch := range cache.watchAll {
 		response := cache.computeSotwResponse(watch, false)
 		if response != nil {
 			watch.Response <- response
-			delete(cache.watchAll, watchId)
+			delete(cache.watchAll, watchID)
 		} else {
-			cache.log.Warnf("[Linear cache] Watch %d detected as triggered did not get notified", watchId)
+			cache.log.Warnf("[Linear cache] Watch %d detected as triggered did not get notified", watchID)
 		}
 	}
 
@@ -444,45 +460,48 @@ func (cache *LinearCache) CreateWatch(request *Request, sub Subscription, value 
 		return func() {}, nil
 	}
 
-	watchId := cache.nextSotwWatchID()
+	watchID := cache.nextSotwWatchID()
 	// Create open watches since versions are up to date.
 	if sub.IsWildcard() {
-		cache.log.Infof("[linear cache] open watch %d for %s all resources, system version %q", watchId, cache.typeURL, cache.getVersion())
-		cache.watchAll[watchId] = watch
+		cache.log.Infof("[linear cache] open watch %d for %s all resources, system version %q", watchID, cache.typeURL, cache.getVersion())
+		cache.watchAll[watchID] = watch
 		return func() {
 			cache.mu.Lock()
 			defer cache.mu.Unlock()
-			delete(cache.watchAll, watchId)
+			delete(cache.watchAll, watchID)
 		}, nil
 	}
 
-	cache.log.Infof("[linear cache] open watch %d for %s resources %v, system version %q", watchId, cache.typeURL, sub.SubscribedResources(), cache.getVersion())
+	cache.log.Infof("[linear cache] open watch %d for %s resources %v, system version %q", watchID, cache.typeURL, sub.SubscribedResources(), cache.getVersion())
 	for name := range sub.SubscribedResources() {
 		set, exists := cache.watches[name]
 		if !exists {
 			set = make(map[int64]ResponseWatch)
 			cache.watches[name] = set
 		}
-		set[watchId] = watch
+		set[watchID] = watch
 	}
 	return func() {
 		cache.mu.Lock()
 		defer cache.mu.Unlock()
-		cache.removeWatch(watchId, watch.subscription)
+		cache.removeWatch(watchID, watch.subscription)
 	}, nil
 }
 
 func (cache *LinearCache) nextSotwWatchID() int64 {
+	if atomic.LoadInt64(&cache.sotwWatchCount)+1 < 0 {
+		panic("watch id count overflow")
+	}
 	return atomic.AddInt64(&cache.sotwWatchCount, 1)
 }
 
 // Must be called under lock
-func (cache *LinearCache) removeWatch(watchId int64, sub Subscription) {
+func (cache *LinearCache) removeWatch(watchID int64, sub Subscription) {
 	// Make sure we clean the watch for ALL resources it might be associated with,
 	// as the channel will no longer be listened to
 	for resource := range sub.SubscribedResources() {
 		resourceWatches := cache.watches[resource]
-		delete(resourceWatches, watchId)
+		delete(resourceWatches, watchID)
 		if len(resourceWatches) == 0 {
 			delete(cache.watches, resource)
 		}

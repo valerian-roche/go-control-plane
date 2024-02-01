@@ -93,9 +93,6 @@ func verifyResponseContent(t *testing.T, ch <-chan Response, expectedType, expec
 	if out.GetTypeUrl() != expectedType {
 		t.Errorf("unexpected type URL: %q", out.GetTypeUrl())
 	}
-	if len(r.GetRequest().GetResourceNames()) != 0 && len(r.GetRequest().GetResourceNames()) < len(out.Resources) {
-		t.Errorf("received more resources (%d) than requested (%d)", len(r.GetRequest().GetResourceNames()), len(out.Resources))
-	}
 	return r, out
 }
 
@@ -182,17 +179,16 @@ func validateDeltaResponse(t *testing.T, resp DeltaResponse, resources []resourc
 	}
 }
 
-func verifyDeltaResponse(t *testing.T, ch <-chan DeltaResponse, resources []resourceInfo, deleted []string, options ...validateOption) DeltaResponse {
+func verifyDeltaResponse(t *testing.T, ch <-chan DeltaResponse, resources []resourceInfo, deleted []string, options ...validateOption) {
 	t.Helper()
 	var r DeltaResponse
 	select {
 	case r = <-ch:
 	case <-time.After(5 * time.Second):
 		t.Error("timeout waiting for delta response")
-		return nil
+		return
 	}
 	validateDeltaResponse(t, r, resources, deleted, options...)
-	return r
 }
 
 func checkWatchCount(t *testing.T, c *LinearCache, name string, count int) {
@@ -433,7 +429,7 @@ func TestLinearSetResources(t *testing.T) {
 		"b": testResource("b"),
 		"c": testResource("c"),
 	})
-	verifyResponse(t, w1, "", 0) // removing a resource from the set triggers existing watches for deleted resources
+	mustBlock(t, w1) // removing a resource from the set does not trigger the watch for non full state resources
 	verifyResponse(t, w2, "3", 2)
 }
 
@@ -481,35 +477,79 @@ func TestLinearVersionPrefix(t *testing.T) {
 }
 
 func TestLinearDeletion(t *testing.T) {
-	c := NewLinearCache(testType, WithInitialResources(map[string]types.Resource{"a": testResource("a"), "b": testResource("b")}))
-	w := make(chan Response, 1)
-	req := &Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}
-	sub := subFromRequest(req)
-	sub.SetReturnedResources(map[string]string{"a": "0"})
-	_, err := c.CreateWatch(req, sub, w)
-	require.NoError(t, err)
-	mustBlock(t, w)
-	checkWatchCount(t, c, "a", 1)
+	t.Run("non full-state resource", func(t *testing.T) {
+		c := NewLinearCache(testType, WithInitialResources(map[string]types.Resource{"a": testResource("a"), "b": testResource("b")}))
+		w := make(chan Response, 1)
+		req := &Request{ResourceNames: []string{"a"}, TypeUrl: testType, VersionInfo: "0"}
+		sub := subFromRequest(req)
+		sub.SetReturnedResources(map[string]string{"a": "0"})
+		cancel, err := c.CreateWatch(req, sub, w)
+		require.NoError(t, err)
+		mustBlock(t, w)
+		checkWatchCount(t, c, "a", 1)
 
-	require.NoError(t, c.DeleteResource("a"))
-	resp := verifyResponse(t, w, "1", 0)
-	updateFromSotwResponse(resp, &sub, req)
-	checkWatchCount(t, c, "a", 0)
+		require.NoError(t, c.DeleteResource("a"))
+		// For non full-state type, we don't return on deletion
+		mustBlock(t, w)
+		// We currently do not clean watches for resources on deletion.
+		// checkWatchCount(t, c, "a", 0)
 
-	req = &Request{TypeUrl: testType, VersionInfo: "0"}
-	sub = subFromRequest(req)
-	_, err = c.CreateWatch(req, sub, w)
-	require.NoError(t, err)
-	resp = verifyResponse(t, w, "1", 1)
-	updateFromSotwResponse(resp, &sub, req)
-	checkWatchCount(t, c, "b", 0)
-	require.NoError(t, c.DeleteResource("b"))
+		cancel()
+		checkWatchCount(t, c, "a", 0)
 
-	req.VersionInfo = "1"
-	_, err = c.CreateWatch(req, sub, w)
-	require.NoError(t, err)
-	verifyResponse(t, w, "2", 0)
-	checkWatchCount(t, c, "b", 0)
+		// Create a wildcard watch
+		req = &Request{TypeUrl: testType, VersionInfo: "0"}
+		sub = subFromRequest(req)
+		_, err = c.CreateWatch(req, sub, w)
+		require.NoError(t, err)
+		resp := verifyResponse(t, w, "1", 1)
+		updateFromSotwResponse(resp, &sub, req)
+		checkWatchCount(t, c, "b", 0)
+		require.NoError(t, c.DeleteResource("b"))
+
+		req.VersionInfo = "1"
+		_, err = c.CreateWatch(req, sub, w)
+		require.NoError(t, err)
+		// b is watched by wildcard, but for non-full-state resources we cannot report deletions
+		mustBlock(t, w)
+		assert.Len(t, c.watchAll, 1)
+	})
+
+	t.Run("full-state resource", func(t *testing.T) {
+		c := NewLinearCache(resource.ClusterType, WithInitialResources(map[string]types.Resource{"a": &cluster.Cluster{Name: "a"}, "b": &cluster.Cluster{Name: "b"}}))
+		w := make(chan Response, 1)
+		req := &Request{ResourceNames: []string{"a"}, TypeUrl: resource.ClusterType, VersionInfo: "0"}
+		sub := subFromRequest(req)
+		sub.SetReturnedResources(map[string]string{"a": "0"})
+		_, err := c.CreateWatch(req, sub, w)
+		require.NoError(t, err)
+		mustBlock(t, w)
+		checkWatchCount(t, c, "a", 1)
+
+		require.NoError(t, c.DeleteResource("a"))
+		// We get a response with no resource as full update and only a was requested
+		resp := verifyResponseResources(t, w, resource.ClusterType, "1")
+		updateFromSotwResponse(resp, &sub, req)
+		checkWatchCount(t, c, "a", 0)
+
+		// New wildcard request
+		req = &Request{TypeUrl: resource.ClusterType, VersionInfo: "0"}
+		sub = subFromRequest(req)
+		_, err = c.CreateWatch(req, sub, w)
+		require.NoError(t, err)
+		// b still exists in the cache
+		resp = verifyResponseResources(t, w, resource.ClusterType, "1", "b")
+		updateFromSotwResponse(resp, &sub, req)
+		checkWatchCount(t, c, "b", 0)
+		require.NoError(t, c.DeleteResource("b"))
+
+		req.VersionInfo = "1"
+		_, err = c.CreateWatch(req, sub, w)
+		require.NoError(t, err)
+		// The cache no longer contains any resource, and as full-state is requested a response is provided
+		_ = verifyResponseResources(t, w, resource.ClusterType, "2")
+		checkWatchCount(t, c, "b", 0)
+	})
 }
 
 func TestLinearWatchTwo(t *testing.T) {
@@ -573,7 +613,6 @@ func TestLinearCancel(t *testing.T) {
 
 	req2 := &Request{ResourceNames: []string{"b"}, TypeUrl: testType, VersionInfo: "1"}
 	sub2 := subFromRequest(req2)
-	sub2.SetReturnedResources(map[string]string{"a": "1"})
 	cancel2, err := c.CreateWatch(req2, sub2, w2)
 	require.NoError(t, err)
 	req3 := &Request{TypeUrl: testType, VersionInfo: "1"}
@@ -964,8 +1003,7 @@ func TestLinearMixedWatches(t *testing.T) {
 	err = c.UpdateResources(nil, []string{"b"})
 	require.NoError(t, err)
 	checkVersionMapSet(t, c)
-
-	verifyResponseResources(t, w, resource.EndpointType, c.getVersion())
+	mustBlock(t, w) // For sotw with non full-state resources, we don't report deletions
 	verifyDeltaResponse(t, wd, nil, []string{"b"}, responseType(resource.EndpointType))
 }
 
@@ -1128,5 +1166,310 @@ func TestLinearSotwWatches(t *testing.T) {
 		verifyResponseResources(t, w1, resource.ClusterType, cache.getVersion(), "a", "b", "d")
 		verifyResponseResources(t, w2, resource.ClusterType, cache.getVersion(), "a", "b", "c", "d")
 		verifyResponseResources(t, w3, resource.ClusterType, cache.getVersion(), "a", "c", "d")
+	})
+}
+
+func TestLinearSotwNonWildcard(t *testing.T) {
+	var cache *LinearCache
+	resourceType := resource.EndpointType
+
+	reqs := make([]*discovery.DiscoveryRequest, 4)
+	subs := make([]stream.Subscription, 4)
+	watches := make([]chan Response, 4)
+
+	buildRequest := func(res []string, version string) *discovery.DiscoveryRequest {
+		return &discovery.DiscoveryRequest{
+			ResourceNames: res,
+			TypeUrl:       resourceType,
+		}
+	}
+	updateReqResources := func(index int, res []string) {
+		t.Helper()
+		reqs[index-1].ResourceNames = res
+		subs[index-1].SetResourceSubscription(reqs[index-1].ResourceNames)
+	}
+
+	createWatchWithCancel := func(index int) func() {
+		t.Helper()
+		w := make(chan Response, 1)
+		cancel, err := cache.CreateWatch(reqs[index-1], subs[index-1], w)
+		require.NoError(t, err)
+		watches[index-1] = w
+		return cancel
+	}
+	createWatch := func(index int) {
+		t.Helper()
+		_ = createWatchWithCancel(index)
+	}
+	validateResponse := func(index int, res []string) {
+		t.Helper()
+		resp := verifyResponseResources(t, watches[index-1], resourceType, cache.getVersion(), res...)
+		updateFromSotwResponse(resp, &subs[index-1], reqs[index-1])
+	}
+	checkPendingWatch := func(index int) {
+		t.Helper()
+		mustBlock(t, watches[index-1])
+	}
+
+	// We run twice the same sequence of events,
+	// First run is for endpoints, currently not a full-state resource
+	// Second run is for clusters, currently a full-state resource
+	t.Run("type not returning full state", func(t *testing.T) {
+		resourceType := resource.EndpointType
+		buildEndpoint := func(name string) *endpoint.ClusterLoadAssignment {
+			return &endpoint.ClusterLoadAssignment{ClusterName: name}
+		}
+
+		cache = NewLinearCache(resourceType, WithLogger(log.NewTestLogger(t)), WithInitialResources(
+			map[string]types.Resource{
+				"a": buildEndpoint("a"),
+				"b": buildEndpoint("b"),
+				"c": buildEndpoint("c"),
+			},
+		))
+
+		// Create watches
+		// Watch 1, wildcard, starting with the current cache version
+		reqs[0] = buildRequest(nil, cache.getVersion())
+		subs[0] = subFromRequest(reqs[0])
+		// Watch 2, wildcard, starting with no version (https://github.com/envoyproxy/go-control-plane/issues/855)
+		reqs[1] = buildRequest([]string{"*"}, "")
+		subs[1] = subFromRequest(reqs[1])
+		// Watch 3, non-wildcard, starting with a different cache prefix
+		reqs[2] = buildRequest([]string{"a", "b"}, "prefix-"+cache.getVersion())
+		subs[2] = subFromRequest(reqs[2])
+		// Watch 4, non-wildcard, starting with no version
+		reqs[3] = buildRequest([]string{"d"}, "")
+		subs[3] = subFromRequest(reqs[3])
+
+		// Create watches
+		// Version is ignored as we cannot guarantee the state, so everything is returned
+		createWatch(1)
+		validateResponse(1, []string{"a", "b", "c"})
+		// Standard first wilcard request
+		createWatch(2)
+		validateResponse(2, []string{"a", "b", "c"})
+		// Version has a different prefix and we send everything requested
+		createWatch(3)
+		validateResponse(3, []string{"a", "b"})
+		// No requested version is available, so we return an empty response on first request
+		createWatch(4)
+		validateResponse(4, []string{})
+
+		// Recreate watches
+		createWatch(1)
+		checkPendingWatch(1)
+		createWatch(2)
+		checkPendingWatch(2)
+		createWatch(3)
+		checkPendingWatch(3)
+		createWatch(4)
+		checkPendingWatch(4)
+
+		// Update the cache
+		cache.UpdateResources(map[string]types.Resource{
+			"b": buildEndpoint("b"),
+			"d": buildEndpoint("d"),
+		}, []string{"a"})
+
+		validateResponse(1, []string{"b", "d"})
+		validateResponse(2, []string{"b", "d"})
+		validateResponse(3, []string{"b"})
+		validateResponse(4, []string{"d"})
+
+		createWatch(1)
+		checkPendingWatch(1)
+		// Make watch 2 no longer wildcard
+		updateReqResources(2, []string{"a", "c", "d"})
+		c2 := createWatchWithCancel(2)
+		checkPendingWatch(2)
+		c3 := createWatchWithCancel(3)
+		checkPendingWatch(3)
+		// Add a resource to watch 4 (https://github.com/envoyproxy/go-control-plane/issues/608)
+		updateReqResources(4, []string{"c", "d"})
+		createWatch(4)
+		validateResponse(4, []string{"c"}) // c is newly requested, and should be returned
+		createWatch(4)
+		checkPendingWatch(4)
+
+		// Add a new resource not request in all subscriptions
+		cache.UpdateResource("e", buildEndpoint("e"))
+		validateResponse(1, []string{"e"})
+		createWatch(1)
+		checkPendingWatch(1)
+		checkPendingWatch(2) // No longer wildcard
+		checkPendingWatch(3)
+		checkPendingWatch(4)
+
+		// Cancel two watches to change resources
+		assert.Len(t, cache.watches["c"], 2)
+		c2()
+		assert.Len(t, cache.watches["c"], 1)
+		assert.Len(t, cache.watches["b"], 1)
+		c3()
+		assert.Len(t, cache.watches["b"], 0)
+
+		// Remove a resource from 2 (was a, c, d)
+		updateReqResources(2, []string{"a", "d"})
+		createWatch(2)
+		checkPendingWatch(2)
+
+		// 3 is now wildcard (was a, b). The version still matches the previous one
+		updateReqResources(3, []string{"*"})
+		createWatch(3)
+		validateResponse(3, []string{"c", "d", "e"})
+		createWatch(3)
+		checkPendingWatch(3)
+
+		// Do an update removing a resource only
+		// This type is not full update, and therefore does not return
+		cache.UpdateResources(nil, []string{"c"})
+		checkPendingWatch(1)
+		checkPendingWatch(2)
+		checkPendingWatch(3)
+		checkPendingWatch(4)
+
+		// Do an update in the cache to confirm all is well
+		cache.UpdateResources(map[string]types.Resource{
+			"a": buildEndpoint("a"),
+			"b": buildEndpoint("b"),
+		}, nil)
+		validateResponse(1, []string{"a", "b"})
+		validateResponse(2, []string{"a"})
+		validateResponse(3, []string{"a", "b"})
+		checkPendingWatch(4)
+	})
+
+	t.Run("type returning full state", func(t *testing.T) {
+		resourceType = resource.ClusterType
+		buildCluster := func(name string) *cluster.Cluster {
+			return &cluster.Cluster{Name: name}
+		}
+
+		cache = NewLinearCache(resource.ClusterType, WithLogger(log.NewTestLogger(t)), WithInitialResources(
+			map[string]types.Resource{
+				"a": buildCluster("a"),
+				"b": buildCluster("b"),
+				"c": buildCluster("c"),
+			},
+		))
+
+		// Create watches
+		// Watch 1, wildcard, starting with the current cache version
+		reqs[0] = buildRequest(nil, cache.getVersion())
+		subs[0] = subFromRequest(reqs[0])
+		// Watch 2, wildcard, starting with no version (https://github.com/envoyproxy/go-control-plane/issues/855)
+		reqs[1] = buildRequest([]string{"*"}, "")
+		subs[1] = subFromRequest(reqs[1])
+		// Watch 3, non-wildcard, starting with a different cache prefix
+		reqs[2] = buildRequest([]string{"a", "b"}, "prefix-"+cache.getVersion())
+		subs[2] = subFromRequest(reqs[2])
+		// Watch 4, non-wildcard, starting with no version
+		reqs[3] = buildRequest([]string{"d"}, "")
+		subs[3] = subFromRequest(reqs[3])
+
+		// Create watches
+		// Version is ignored as we cannot guarantee the state, so everything is returned
+		createWatch(1)
+		validateResponse(1, []string{"a", "b", "c"})
+		// Standard first wilcard request
+		createWatch(2)
+		validateResponse(2, []string{"a", "b", "c"})
+		// Version has a different prefix and we send everything requested
+		createWatch(3)
+		validateResponse(3, []string{"a", "b"})
+		// No requested version is available, so we return an empty response on first request
+		createWatch(4)
+		validateResponse(4, []string{})
+
+		// Recreate watches
+		createWatch(1)
+		checkPendingWatch(1)
+		createWatch(2)
+		checkPendingWatch(2)
+		createWatch(3)
+		checkPendingWatch(3)
+		createWatch(4)
+		checkPendingWatch(4)
+
+		// Update the cache
+		cache.UpdateResources(map[string]types.Resource{
+			"b": buildCluster("b"),
+			"d": buildCluster("d"),
+		}, []string{"a"})
+
+		validateResponse(1, []string{"b", "c", "d"})
+		validateResponse(2, []string{"b", "c", "d"})
+		validateResponse(3, []string{"b"})
+		validateResponse(4, []string{"d"})
+
+		createWatch(1)
+		checkPendingWatch(1)
+		// Make watch 2 no longer wildcard
+		updateReqResources(2, []string{"a", "c", "d"})
+		c2 := createWatchWithCancel(2)
+		checkPendingWatch(2)
+		c3 := createWatchWithCancel(3)
+		checkPendingWatch(3)
+		// Add a resource to req4 (https://github.com/envoyproxy/go-control-plane/issues/608)
+		updateReqResources(4, []string{"c", "d"})
+		createWatch(4)
+		validateResponse(4, []string{"c", "d"}) // c is newly requested, and should be returned
+		createWatch(4)
+		checkPendingWatch(4)
+
+		// Add a new resource not request in all subscriptions
+		cache.UpdateResource("e", buildCluster("e"))
+		validateResponse(1, []string{"b", "c", "d", "e"})
+		createWatch(1)
+		checkPendingWatch(1)
+		checkPendingWatch(2) // No longer wildcard
+		checkPendingWatch(3)
+		checkPendingWatch(4)
+
+		// Cancel two watches to change resources
+		assert.Len(t, cache.watches["c"], 2)
+		c2()
+		assert.Len(t, cache.watches["c"], 1)
+		assert.Len(t, cache.watches["b"], 1)
+		c3()
+		assert.Len(t, cache.watches["b"], 0)
+
+		// Remove a resource from 2 (was a, c, d)
+		updateReqResources(2, []string{"a", "d"})
+		createWatch(2)
+		checkPendingWatch(2)
+
+		// 3 is now wildcard (was a, b). The version still matches the previous one
+		updateReqResources(3, []string{"*"})
+		createWatch(3)
+		validateResponse(3, []string{"b", "c", "d", "e"})
+		createWatch(3)
+		checkPendingWatch(3)
+
+		// Do an update removing a resource only
+		// This type is not full update, and therefore does not return
+		cache.UpdateResources(nil, []string{"c"})
+		validateResponse(1, []string{"b", "d", "e"})
+		checkPendingWatch(2)
+		validateResponse(3, []string{"b", "d", "e"})
+		validateResponse(4, []string{"d"})
+
+		createWatch(1)
+		checkPendingWatch(1)
+		createWatch(3)
+		checkPendingWatch(3)
+		createWatch(4)
+		checkPendingWatch(4)
+
+		// Do an update in the cache to confirm all is well
+		cache.UpdateResources(map[string]types.Resource{
+			"a": buildCluster("a"),
+			"b": buildCluster("b"),
+		}, nil)
+		validateResponse(1, []string{"a", "b", "d", "e"})
+		validateResponse(2, []string{"a", "d"})
+		validateResponse(3, []string{"a", "b", "d", "e"})
+		checkPendingWatch(4)
 	})
 }

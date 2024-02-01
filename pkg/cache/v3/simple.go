@@ -404,7 +404,7 @@ func (cache *snapshotCache) CreateWatch(request *Request, sub Subscription, valu
 
 	createWatch := func(watch ResponseWatch) func() {
 		watchID := cache.nextWatchID()
-		cache.log.Debugf("open watch %d for %s%v from nodeID %q, version %q", watchID, request.GetTypeUrl(), sub.SubscribedResources(), nodeID, request.GetVersionInfo())
+		cache.log.Debugf("open watch %d for %s %v from nodeID %q, version %q", watchID, request.GetTypeUrl(), sub.SubscribedResources(), nodeID, request.GetVersionInfo())
 		info.mu.Lock()
 		info.watches[watchID] = watch
 		info.mu.Unlock()
