@@ -489,10 +489,11 @@ func (cache *LinearCache) CreateWatch(request *Request, sub Subscription, value 
 }
 
 func (cache *LinearCache) nextSotwWatchID() int64 {
-	if atomic.LoadInt64(&cache.sotwWatchCount)+1 < 0 {
+	next := atomic.AddInt64(&cache.sotwWatchCount, 1)
+	if next < 0 {
 		panic("watch id count overflow")
 	}
-	return atomic.AddInt64(&cache.sotwWatchCount, 1)
+	return next
 }
 
 // Must be called under lock

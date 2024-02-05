@@ -206,7 +206,7 @@ func (cache *snapshotCache) sendHeartbeats(ctx context.Context, node string) {
 			if len(resourcesWithTTL) == 0 {
 				continue
 			}
-			cache.log.Debugf("respond open watch %d%v with heartbeat for version %q", id, watch.Request.GetResourceNames(), version)
+			cache.log.Debugf("respond open watch %d %v with heartbeat for version %q", id, watch.Request.GetResourceNames(), version)
 			err := cache.respond(ctx, watch, resourcesWithTTL, version, true)
 			if err != nil {
 				cache.log.Errorf("received error when attempting to respond to watches: %v", err)
@@ -250,7 +250,7 @@ func (cache *snapshotCache) respondSOTWWatches(ctx context.Context, info *status
 	respond := func(watch ResponseWatch, id int64) error {
 		version := snapshot.GetVersion(watch.Request.GetTypeUrl())
 		if version != watch.Request.GetVersionInfo() {
-			cache.log.Debugf("respond open watch %d %s%v with new version %q", id, watch.Request.GetTypeUrl(), watch.Request.GetResourceNames(), version)
+			cache.log.Debugf("respond open watch %d %s %v with new version %q", id, watch.Request.GetTypeUrl(), watch.Request.GetResourceNames(), version)
 			resources := snapshot.GetResourcesAndTTL(watch.Request.GetTypeUrl())
 			err := cache.respond(ctx, watch, resources, version, false)
 			if err != nil {
@@ -486,7 +486,7 @@ func (cache *snapshotCache) respond(ctx context.Context, watch ResponseWatch, re
 	// if they do not, then the watch is never responded, and it is expected that envoy makes another request
 	if len(request.GetResourceNames()) != 0 && cache.ads {
 		if err := superset(nameSet(request.GetResourceNames()), resources); err != nil {
-			cache.log.Warnf("ADS mode: not responding to request %s%v: %v", request.GetTypeUrl(), request.GetResourceNames(), err)
+			cache.log.Warnf("ADS mode: not responding to request %s %v: %v", request.GetTypeUrl(), request.GetResourceNames(), err)
 			return nil
 		}
 	}

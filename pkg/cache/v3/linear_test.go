@@ -491,8 +491,6 @@ func TestLinearDeletion(t *testing.T) {
 		require.NoError(t, c.DeleteResource("a"))
 		// For non full-state type, we don't return on deletion
 		mustBlock(t, w)
-		// We currently do not clean watches for resources on deletion.
-		// checkWatchCount(t, c, "a", 0)
 
 		cancel()
 		checkWatchCount(t, c, "a", 0)
@@ -1181,6 +1179,7 @@ func TestLinearSotwNonWildcard(t *testing.T) {
 		return &discovery.DiscoveryRequest{
 			ResourceNames: res,
 			TypeUrl:       resourceType,
+			VersionInfo:   version,
 		}
 	}
 	updateReqResources := func(index int, res []string) {
@@ -1267,7 +1266,7 @@ func TestLinearSotwNonWildcard(t *testing.T) {
 		checkPendingWatch(4)
 
 		// Update the cache
-		cache.UpdateResources(map[string]types.Resource{
+		_ = cache.UpdateResources(map[string]types.Resource{
 			"b": buildEndpoint("b"),
 			"d": buildEndpoint("d"),
 		}, []string{"a"})
@@ -1292,8 +1291,8 @@ func TestLinearSotwNonWildcard(t *testing.T) {
 		createWatch(4)
 		checkPendingWatch(4)
 
-		// Add a new resource not request in all subscriptions
-		cache.UpdateResource("e", buildEndpoint("e"))
+		// Add a new resource not requested in all subscriptions
+		_ = cache.UpdateResource("e", buildEndpoint("e"))
 		validateResponse(1, []string{"e"})
 		createWatch(1)
 		checkPendingWatch(1)
@@ -1323,14 +1322,14 @@ func TestLinearSotwNonWildcard(t *testing.T) {
 
 		// Do an update removing a resource only
 		// This type is not full update, and therefore does not return
-		cache.UpdateResources(nil, []string{"c"})
+		_ = cache.UpdateResources(nil, []string{"c"})
 		checkPendingWatch(1)
 		checkPendingWatch(2)
 		checkPendingWatch(3)
 		checkPendingWatch(4)
 
 		// Do an update in the cache to confirm all is well
-		cache.UpdateResources(map[string]types.Resource{
+		_ = cache.UpdateResources(map[string]types.Resource{
 			"a": buildEndpoint("a"),
 			"b": buildEndpoint("b"),
 		}, nil)
@@ -1393,7 +1392,7 @@ func TestLinearSotwNonWildcard(t *testing.T) {
 		checkPendingWatch(4)
 
 		// Update the cache
-		cache.UpdateResources(map[string]types.Resource{
+		_ = cache.UpdateResources(map[string]types.Resource{
 			"b": buildCluster("b"),
 			"d": buildCluster("d"),
 		}, []string{"a"})
@@ -1419,7 +1418,7 @@ func TestLinearSotwNonWildcard(t *testing.T) {
 		checkPendingWatch(4)
 
 		// Add a new resource not request in all subscriptions
-		cache.UpdateResource("e", buildCluster("e"))
+		_ = cache.UpdateResource("e", buildCluster("e"))
 		validateResponse(1, []string{"b", "c", "d", "e"})
 		createWatch(1)
 		checkPendingWatch(1)
@@ -1449,7 +1448,7 @@ func TestLinearSotwNonWildcard(t *testing.T) {
 
 		// Do an update removing a resource only
 		// This type is not full update, and therefore does not return
-		cache.UpdateResources(nil, []string{"c"})
+		_ = cache.UpdateResources(nil, []string{"c"})
 		validateResponse(1, []string{"b", "d", "e"})
 		checkPendingWatch(2)
 		validateResponse(3, []string{"b", "d", "e"})
@@ -1463,7 +1462,7 @@ func TestLinearSotwNonWildcard(t *testing.T) {
 		checkPendingWatch(4)
 
 		// Do an update in the cache to confirm all is well
-		cache.UpdateResources(map[string]types.Resource{
+		_ = cache.UpdateResources(map[string]types.Resource{
 			"a": buildCluster("a"),
 			"b": buildCluster("b"),
 		}, nil)
