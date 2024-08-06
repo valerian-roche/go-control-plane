@@ -168,6 +168,13 @@ func (m *AggregatedConfigSource) MarshalToSizedBufferVTStrict(dAtA []byte) (int,
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
 	}
+	if len(m.Instance) > 0 {
+		i -= len(m.Instance)
+		copy(dAtA[i:], m.Instance)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Instance)))
+		i--
+		dAtA[i] = 0xa
+	}
 	return len(dAtA) - i, nil
 }
 
@@ -652,6 +659,10 @@ func (m *AggregatedConfigSource) SizeVT() (n int) {
 	}
 	var l int
 	_ = l
+	l = len(m.Instance)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
 	n += len(m.unknownFields)
 	return n
 }
